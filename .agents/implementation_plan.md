@@ -207,7 +207,7 @@ data class MediaItem(
         }
         return copy(
             title = title.trim(),
-            sourceUrl = sourceUrl.trim(),
+            sourceUrl = UrlNormalizer.normalize(sourceUrl),
             coverImageUrl = coverImageUrl.trim(),
             totalItems = safeTotal,
             currentProgress = safeProgress
@@ -281,10 +281,6 @@ interface MediaItemDao {
     // Reactive single-item observation (used by EditItemViewModel)
     @Query("SELECT * FROM media_items WHERE id = :id")
     fun observeById(id: String): Flow<MediaItemEntity?>
-
-    // Lightweight health check — SELECT 1 evaluates instantly without table scans
-    @Query("SELECT 1")
-    suspend fun healthCheck(): Int?
 
     // One-shot reads
     @Query("SELECT * FROM media_items WHERE id = :id")
@@ -368,24 +364,11 @@ The `clearAndInsert` method above is wrong — `@Transaction` + `@Query` works f
 @Transaction
 suspend fun replaceAll(items: List<MediaItemEntity>) {
     deleteAll()
-    // Chunk the upsert to avoid building one giant in-memory entity list.
-    // 500 items per chunk balances memory vs number of SQL statements.
-    // For a 10k-item import, this runs 20 batch inserts inside the same
-    // atomic transaction — still atomic, not one monolithic SQL blob.
-    // Note: chunking does NOT shorten the SQLite write lock in rollback
-    // journal mode — a single @Transaction holds the write lock for the
-    // entire duration regardless of chunking. The memory win alone makes
-    // chunking worthwhile (avoids OOM on 10k-item upsertAll). The real
-    // benefit for read concurrency comes from WAL mode (setJournalMode),
-    // where readers aren't blocked during the write transaction at all.
-    // Chunk size is 100 because MediaItemEntity has 9 columns.
-    // 100 * 9 = 900 bound variables — safely under Android's SQLite limit of 999.
-    // Using 500 would produce 4,500 bound variables, crashing on API ≤ 30.
-    items.chunked(100).forEach { chunk -> upsertAll(chunk) }
+    upsertAll(items)
 }
 ```
 
-Note: `@Transaction` on an interface default method works because Room generates the wrapper class. The function does NOT need to be `open`. The entire `deleteAll() + chunked upserts` is one atomic unit — if any chunk fails, SQLite rolls back the entire transaction including all prior chunks and the delete. No data loss. The chunk size of 100 keeps bound variables under the SQLite limit of 999 (9 columns × 100 = 900). It does NOT shorten the write lock — the lock is held for the full transaction regardless. For read concurrency during a write, configure WAL mode via `setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)` on the Room builder.
+Note: `@Transaction` on an interface default method works because Room generates the wrapper class. The function does NOT need to be `open`. The entire `deleteAll() + upsertAll()` is one atomic unit — if the upsert fails, SQLite rolls back the entire transaction including the delete. No data loss. Room's generated upsert binds one entity at a time per SQL statement, so there is no SQLite parameter limit issue regardless of list size. For read concurrency during a write, configure WAL mode via `setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)` on the Room builder.
 
 **AI Verification Checklist**:
 - `observeAll()` returns `Flow` — Room runs this on a background thread automatically
@@ -553,50 +536,38 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 - No cookies are persisted between requests (`NoCookieJar` or null CookieJar)
 - The request is a GET with standard headers only (no custom auth headers)
 - Scraper is injectable (takes OkHttpClient as constructor parameter) — testable
-- `scrape()` is a `suspend` function — MUST use `suspendCancellableCoroutine` with `call.enqueue()` to properly propagate coroutine cancellation to OkHttp. Simply wrapping `call.execute()` in `withContext(Dispatchers.IO)` is WRONG — OkHttp's blocking `execute()` ignores coroutine cancellation until the read timeout (15s). The correct pattern:
+- `scrape()` is a `suspend` function — use `withContext(Dispatchers.IO)` with `call.execute()` and a cancellation listener, then run `Jsoup.parse()` on `Dispatchers.Default`. The `suspendCancellableCoroutine` + `enqueue` pattern is incorrect because it runs `Jsoup.parse()` (CPU-bound) on OkHttp's IO callback thread. The correct pattern:
   ```kotlin
-  suspend fun scrape(url: String): Result<ScrapedMetadata> = suspendCancellableCoroutine { continuation ->
-      val request = Request.Builder().url(url).build()
-      val call = okHttpClient.newCall(request)
-      continuation.invokeOnCancellation { call.cancel() }
-      call.enqueue(object : Callback {
-          override fun onResponse(call: Call, response: Response) {
-                try {
-                    val body = response.body ?: throw IOException("Empty body")
-                    // Check Content-Length header first — fast rejection for known-large
-                    val contentLength = body.contentLength()
-                    if (contentLength > 5 * 1024 * 1024) throw IOException("File too large")
-                    // BoundedInputStream: streams directly to Jsoup without buffering
-                    // the entire HTML as a contiguous 5MB byte array + String.
-                    // Eliminates the intermediate Okio ByteString allocation.
-                    val boundedStream = object : InputStream() {
-                        private val delegate = body.byteStream()
-                        private var bytesRead = 0L
-                        override fun read(): Int {
-                            if (bytesRead >= MAX_SCRAPE_BYTES) return -1
-                            val result = delegate.read()
-                            if (result != -1) bytesRead++
-                            return result
-                        }
-                        override fun read(b: ByteArray, off: Int, len: Int): Int {
-                            val remaining = MAX_SCRAPE_BYTES - bytesRead
-                            if (remaining <= 0) return -1
-                            val actual = delegate.read(b, off, minOf(len, remaining.toInt()))
-                            if (actual != -1) bytesRead += actual
-                            return actual
-                        }
-                    }
-                    val doc = Jsoup.parse(boundedStream, "UTF-8", url)
-                    // ... extraction logic ...
-                    continuation.resume(Result.success(...))
-                } catch (e: Exception) {
-                    continuation.resume(Result.failure(e))
-                } finally {
-                    response.close()
-                }
+  suspend fun scrape(url: String): Result<ScrapedMetadata> = withContext(Dispatchers.IO) {
+      try {
+          val request = Request.Builder().url(url).build()
+          val call = okHttpClient.newCall(request)
+          
+          currentCoroutineContext()[Job]?.invokeOnCompletion {
+              call.cancel()
           }
-          override fun onFailure(call: Call, e: IOException) { continuation.resume(Result.failure(e)) }
-      })
+
+          call.execute().use { response ->
+              if (!response.isSuccessful) throw IOException("Unexpected code $response")
+              val body = response.body ?: throw IOException("Empty body")
+              
+              // Check Content-Length header first — fast rejection for known-large
+              val contentLength = body.contentLength()
+              if (contentLength > 5 * 1024 * 1024) throw IOException("File too large")
+              // BoundedInputStream: streams directly to Jsoup without buffering
+              // the entire HTML as a contiguous 5MB byte array + String.
+              val limitStream = BoundedInputStream(body.byteStream(), MAX_SCRAPE_BYTES)
+              val doc = withContext(Dispatchers.Default) {
+                  Jsoup.parse(limitStream, "UTF-8", url)
+              }
+              
+              val title = extractTitle(doc)
+              val imageUrl = extractImageUrl(doc)
+              Result.success(ScrapedMetadata(title, imageUrl))
+          }
+      } catch (e: Exception) {
+          Result.failure(e)
+      }
   }
   ```
 - `Result.failure` includes a meaningful error message, not just the exception
@@ -606,19 +577,66 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 
 ```kotlin
 @Serializable
-private data class BackupEnvelope(
+private data class BackupEnvelopeDto(
     val schemaVersion: Int = 1,
-    val items: List<MediaItem>
+    val items: List<MediaItemBackupDto>? = null
+)
+
+@Serializable
+private data class MediaItemBackupDto(
+    val id: String? = null,
+    val category: String? = null,
+    val title: String? = null,
+    val sourceUrl: String? = null,
+    val coverImageUrl: String? = null,
+    val currentProgress: Int? = null,
+    val totalItems: Int? = null,
+    val userStatus: String? = null,
+    val lastUpdated: Long? = null
 )
 
 object BackupProcessor {
-    suspend fun serialize(items: List<MediaItem>): String =
-        Json.encodeToString(BackupEnvelope(items = items))
+    private val backupJson = Json {
+        ignoreUnknownKeys = true
+        decodeEnumsCaseInsensitive = true
+    }
 
-    suspend fun deserialize(json: String): List<MediaItem> =
-        Json.decodeFromString<BackupEnvelope>(json).items
+    @Serializable
+    private data class BackupEnvelope(
+        val schemaVersion: Int = 1,
+        val items: List<MediaItem>
+    )
+
+    suspend fun serialize(items: List<MediaItem>): String = withContext(Dispatchers.Default) {
+        Json.encodeToString(BackupEnvelope(items = items))
+    }
+
+    suspend fun deserialize(json: String): List<MediaItem> = withContext(Dispatchers.Default) {
+        val envelope = backupJson.decodeFromString<BackupEnvelopeDto>(json)
+        envelope.items?.mapNotNull { dto -> dto.toDomain() } ?: emptyList()
+    }
 
     suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem>
+}
+
+private fun MediaItemBackupDto.toDomain(): MediaItem? {
+    val safeTitle = title?.takeIf { it.isNotBlank() } ?: return null
+    val safeCategory = category?.let { MediaCategory.fromString(it) } ?: return null
+    val safeStatus = userStatus?.let { UserStatus.fromString(it) } ?: UserStatus.READING
+    val safeProgress = maxOf(currentProgress ?: 0, 0)
+    val safeTotal = totalItems?.takeIf { it >= 0 }
+    val safeLastUpdated = if (lastUpdated != null && lastUpdated > 0L) lastUpdated else 0L
+    return MediaItem(
+        id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
+        category = safeCategory,
+        title = safeTitle,
+        sourceUrl = sourceUrl?.trim() ?: "",
+        coverImageUrl = coverImageUrl?.trim() ?: "",
+        currentProgress = safeProgress,
+        totalItems = safeTotal,
+        userStatus = safeStatus,
+        lastUpdated = safeLastUpdated
+    ).normalize()
 }
 
 object BackupManager {
@@ -693,7 +711,7 @@ object BackupManager {
 - Export uses temp-file write + contentResolver.copyTo() to prevent partial corruption (NEVER renameTo() on a content:// URI)
 - Merge preserves order deterministically (LinkedHashMap)
 - Merge normalizes every item in the result
-- **Merge stamps pure-additions with `System.currentTimeMillis()`**: items present only in the imported list get import time as `lastUpdated`, NOT epoch 0. Items that existed on both sides retain their conflict-resolved timestamp (epoch 0 → local wins). Verify with a test: local items A+B, imported items B+C → result has A (local lastUpdated), B (local wins), C (≈ now).
+- **Merge stamps pure-additions with `System.currentTimeMillis()` only when they lack a valid timestamp**: items present only in the imported list preserve their historical `lastUpdated` if it is > 0L. Only items without a valid timestamp (null, 0, or negative) get `System.currentTimeMillis() - index`. Items that existed on both sides retain their conflict-resolved timestamp (epoch 0 → local wins). Verify with a test: local items A+B, imported items B+C where C has `lastUpdated = 1700000000000` → result has A (local lastUpdated), B (local wins), C (preserved historical timestamp ≈ 1700000000000).
 - `replaceAll` imports through repository — goes through `normalize()` (invariant enforcement)
 - Serialization uses kotlinx.serialization with `@SerialName` annotations if field names differ from Kotlin property names
 - Test round-trip: serialize → deserialize → serialize → compare
@@ -743,10 +761,12 @@ class HomeViewModel(
 
     val uiState: StateFlow<HomeUiState> = selectedCategoryFlow
         .flatMapLatest { category ->
-            if (category == null) repository.observeAll()
-            else repository.observeByCategory(category)
+            val flow = if (category == null) repository.observeAll()
+                       else repository.observeByCategory(category)
+            flow.map { items ->
+                HomeUiState(items = items, selectedCategory = category, isLoading = false)
+            }
         }
-        .map { items -> HomeUiState(items = items, isLoading = false) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
     fun selectCategory(category: MediaCategory?) {
@@ -817,7 +837,7 @@ class HomeViewModel(
 - Tap outside sheet → dismiss without confirmation (v1 simplicity)
 - Duplicate URL check: normalize the new URL via `UrlNormalizer.normalize()`, then call `repository.existsByUrl(normalizedUrl)` — a single SQLite EXISTS query using near-zero memory. Do NOT fetch the full item list into RAM for a string comparison. Show warning: "This URL is already tracked"
 - Empty cover URL → store as empty string. Coil handles empty URLs by showing placeholder.
-- Progress/Total text fields accept only numeric input (`KeyboardType.Number`). **CRITICAL: Safe Int parsing required**. A user leaning on the "9" key or pasting `"999999999999"` will exceed `Int.MAX_VALUE`, and `text.toInt()` will throw `NumberFormatException` and crash. Always parse as `Long` first, clamp to `Int.MAX_VALUE`, then cast down: `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`.
+- Progress/Total text fields accept only numeric input (`KeyboardType.Number`). **CRITICAL: Safe Int parsing required**. A user leaning on the "9" key or pasting `"999999999999"` will exceed `Int.MAX_VALUE`, and `text.toInt()` will throw `NumberFormatException` and crash. Always parse as `Long` first, clamp to `Int.MAX_VALUE`, then cast down. For `currentProgress` (non-nullable): `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`. For `totalItems` (nullable): `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()` — empty input stays `null`.
 - URL validation on both scrape tap AND submit (user might skip scraping and enter a URL manually)
 
 #### EditItemScreen
@@ -925,34 +945,9 @@ fun LazyDexTheme(
 class MediaRepositoryImpl(
     private val dao: MediaItemDao
 ) : MediaRepository {
-    private val healthMutex = Mutex()
-    private var dbHealthy = false
-
-    /**
-     * Lightweight health check using SELECT 1 instead of observeCount().first().
-     * instantiating a Room Flow + awaiting first() is unnecessarily heavy —
-     * it allocates coroutine channels and invalidation tracker registrations for
-     * a simple ping. SELECT 1 evaluates instantly without touching table indices
-     * and still throws SQLException on corruption.
-     */
-    private suspend fun ensureDbHealthy() {
-        if (!dbHealthy) {
-            healthMutex.withLock {
-                if (!dbHealthy) {
-                    try {
-                        dao.healthCheck()
-                        dbHealthy = true
-                    } catch (e: SQLException) {
-                        throw DatabaseCorruptionException(e)
-                    }
-                }
-            }
-        }
-    }
 
     override fun observeAll(): Flow<List<MediaItem>> {
         return dao.observeAll()
-            .onStart { ensureDbHealthy() }
             .map { entities ->
                 entities.mapNotNull { entity ->
                     try {
@@ -972,7 +967,6 @@ class MediaRepositoryImpl(
 
     override fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>> {
         return dao.observeByCategory(category.name)
-            .onStart { ensureDbHealthy() }
             .map { entities ->
                 entities.mapNotNull { entity ->
                     try {
@@ -985,10 +979,23 @@ class MediaRepositoryImpl(
             .distinctUntilChanged() // Suppress Room table-level invalidation noise
             .flowOn(Dispatchers.Default) // CRITICAL: Force O(N) diffing off the main thread
     }
+
+    override fun observeById(id: String): Flow<MediaItem?> {
+        return dao.observeById(id)
+            .map { entity ->
+                try {
+                    entity?.toDomain()
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+    }
 }
 ```
 
-This guarantees the suspending database check runs precisely when the Flow begins collection, isolating the corruption check perfectly without breaking the stream or requiring complex builder blocks.
+Note: Separate DB corruption detection via `ensureDbHealthy()` is removed. Room opens the database lazily — corruption surfaces naturally on the first actual query and throws `SQLiteDatabaseCorruptException`. Catch it at the application entry point or during regular query subscriptions rather than adding a redundant `SELECT 1` health check.
 
 **Global Error Principles**:
 - Never crash with an unhandled exception. Every coroutine should have a try/catch or a `CoroutineExceptionHandler`.
@@ -1074,9 +1081,9 @@ The AI MUST follow this order. Each phase depends on the previous one.
           .build()
   }
   ```
-- [ ] Create `LazyDexApp.kt` — Application class with Koin `startKoin()`
+- [ ] Create `LazyDexApp.kt` — Application class with Koin `startKoin()`, implements `SingletonImageLoader.Factory` to register the custom Coil `ImageLoader`
 - [ ] Register Application class in AndroidManifest.xml
-- [ ] **AI must verify**: Koin starts without errors, all modules load, no circular dependencies
+- [ ] **AI must verify**: Koin starts without errors, all modules load, no circular dependencies, `SingletonImageLoader.Factory` returns the Koin-injected `ImageLoader`
 
 ### Phase 4: Theme
 - [ ] Create `ui/theme/Color.kt` — custom palette, category colors, status colors
@@ -1477,3 +1484,203 @@ gradlew.bat
 ---
 
 > **Final Instruction to AI**: Do not proceed until you have audited every section above. If you find ambiguities, contradictions, missing edge cases, or design flaws, flag them and propose corrections before writing any code. Be merciless.
+
+---
+
+# LazyDex Implementation Plan — Audit & Validation Report
+
+An exhaustive audit of the [implementation plan](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/.agents/implementation_plan.md) was performed to detect logical inconsistencies, runtime pitfalls, compile errors, and potential AI hallucinations. Below is the list of issues identified, along with explanations and concrete fixes.
+
+---
+
+## 1. Dependency & System Architecture
+
+### 1.1 Coil 3 Custom ImageLoader Ignored by `AsyncImage`
+* **Issue**: The plan defines a custom `ImageLoader` in the Koin DI module (with a 250MB cache and ignore-cache-headers config) but fails to register it as Coil's global singleton. By default, Coil's `AsyncImage` retrieves the image loader using `SingletonImageLoader.get(context)`. Without global registration, `AsyncImage` will fallback to its default image loader, completely ignoring the custom cache settings.
+* **Reason**: Coil 3 requires setting the custom image loader as the singleton or implementing `SingletonImageLoader.Factory` in the `Application` class.
+* **Fix**: Have `LazyDexApp` implement `SingletonImageLoader.Factory` and retrieve the Koin-injected `ImageLoader`:
+  ```kotlin
+  class LazyDexApp : Application(), SingletonImageLoader.Factory {
+      override fun newImageLoader(context: PlatformContext): ImageLoader {
+          return get<ImageLoader>() // Injected from Koin
+      }
+  }
+  ```
+
+### 1.2 CPU-Bound Suspend Functions Run on Main Thread
+* **Issue**: `BackupProcessor.serialize()` and `BackupProcessor.deserialize()` are marked as `suspend` but call synchronous, CPU-heavy functions (`Json.encodeToString` and `Json.decodeFromString`) without wrapping them in `withContext(Dispatchers.Default)`.
+* **Reason**: Marking a function as `suspend` does not automatically move it to a background thread. If launched from a standard `viewModelScope` (which runs on the Main thread), they will run on the main thread and block the UI.
+* **Fix**: Force the execution onto `Dispatchers.Default`:
+  ```kotlin
+  object BackupProcessor {
+      suspend fun serialize(items: List<MediaItem>): String = withContext(Dispatchers.Default) {
+          Json.encodeToString(BackupEnvelope(items = items))
+      }
+
+      suspend fun deserialize(json: String): List<MediaItem> = withContext(Dispatchers.Default) {
+          Json.decodeFromString<BackupEnvelope>(json).items
+      }
+  }
+  ```
+
+---
+
+## 2. Backup & Serialization
+
+### 2.1 Deserialization Failures / Crash on Missing Fields
+* **Issue**: The plan directly deserializes JSON into `List<MediaItem>` (where fields like `currentProgress: Int`, `id: String`, `lastUpdated: Long` are non-nullable and primitive). If a backup is missing any of these fields, kotlinx.serialization will throw a `SerializationException` and fail the entire import. This violates the rules stating that a missing `id` should generate a new UUID and a missing `lastUpdated` should default to `0L`.
+* **Reason**: Strict domain models cannot handle missing or malformed primitive fields directly during JSON decoding without throwing exceptions.
+* **Fix**: Define a separate `@Serializable` Data Transfer Object (DTO) for backups, decode into the DTO, and then manually map and validate/sanitize into the domain model:
+  ```kotlin
+  @Serializable
+  data class MediaItemBackupDto(
+      val id: String? = null,
+      val category: String? = null,
+      val title: String? = null,
+      val sourceUrl: String? = null,
+      val coverImageUrl: String? = null,
+      val currentProgress: Int? = null,
+      val totalItems: Int? = null,
+      val userStatus: String? = null,
+      val lastUpdated: Long? = null
+  )
+  ```
+
+### 2.2 Case-Sensitive Enum Deserialization Crashes
+* **Issue**: The plan states that `category` (stored as `Novel`, `novel`, etc.) and `userStatus` (stored as `Reading`, etc.) should be parsed case-insensitively. However, kotlinx.serialization's default companion `Json` instance is strictly case-sensitive for enums and will crash the import on any non-uppercase enum values.
+* **Reason**: Standard JSON decoding does not apply case-insensitivity or ignore unknown keys unless explicitly configured.
+* **Fix**: Create a configured `Json` instance in `BackupProcessor`:
+  ```kotlin
+  private val backupJson = Json {
+      ignoreUnknownKeys = true
+      decodeEnumsCaseInsensitive = true
+  }
+  // Use backupJson.decodeFromString(...) instead of global Json.decodeFromString
+  ```
+
+### 2.3 Merge Timestamp Contradiction (Data Loss Risk)
+* **Issue**: In the description of the merge logic, the plan states that imported items should preserve their historical timestamps, using `System.currentTimeMillis() - index` only when they lack one. In the checklist, it says the merge must overwrite pure-additions with `System.currentTimeMillis()` (~ now) and verify that item C gets `≈ now`.
+* **Reason**: Overwriting pure-additions with the current timestamp will wipe out the historical timeline of all imported items during a fresh install/restore.
+* **Fix**: The checklist test must be updated to expect historical timestamps to be preserved for pure-additions if they exist in the backup, and only use staggered current time if the backup lacked the field.
+
+---
+
+## 3. Data & DAO Layer
+
+### 3.1 Room SQLite Parameter Limits Hallucination
+* **Issue**: The plan states that Room list operations (like `upsertAll(items)`) will crash SQLite on API <= 30 if the list has more than 100 items (because 500 items with 9 columns would produce 4,500 bound variables, exceeding the 999 SQLite limit). It mandates chunking inserts in batches of 100.
+* **Reason**: This is a hallucination of Room's internals. Room's generated insert/upsert helper compiles to a loop that binds a *single* entity at a time and executes the prepared statement once per row. It never binds all parameters of all rows at once.
+* **Fix**: The chunking logic is unnecessary. A direct `upsertAll(items)` call is fully supported and won't crash on parameter limits.
+
+### 3.2 Redundant & Over-engineered Database Health Check
+* **Issue**: The plan uses `ensureDbHealthy()` executing `SELECT 1` on every Flow start to detect DB corruption.
+* **Reason**: Room opens the database lazily. If the database is corrupt, Room's open helper will fail and throw a `SQLiteDatabaseCorruptException` during the actual query execution (e.g. `observeAll()`). Executing a separate `SELECT 1` query first adds unnecessary JNI and database overhead on every subscription.
+* **Fix**: Remove `ensureDbHealthy()` entirely. Catch standard `SQLException` or `SQLiteDatabaseCorruptException` during regular query subscriptions or at the application entry point.
+
+### 3.3 MediaItem.normalize() URL Inconsistency
+* **Issue**: `MediaItem.normalize()` only trims the `sourceUrl` (`sourceUrl = sourceUrl.trim()`), but duplicate detection is designed to match normalized URLs (lowercase host/scheme, stripped trailing slashes, stripped fragments).
+* **Reason**: Because the URL stored in the DB is not fully normalized, the SQLite UNIQUE index on `sourceUrl` will not prevent duplicates that differ slightly (e.g., `https://site.com/item/` vs `https://site.com/item`).
+* **Fix**: Make `MediaItem.normalize()` call `UrlNormalizer.normalize(sourceUrl)` before copy:
+  ```kotlin
+  fun normalize(): MediaItem {
+      // ...
+      return copy(
+          // ...
+          sourceUrl = UrlNormalizer.normalize(sourceUrl),
+          // ...
+      )
+  }
+  ```
+
+---
+
+## 4. UI & State Management
+
+### 4.1 HomeViewModel State Mapping / Filter Selection Reset
+* **Issue**: The flow mapping in `HomeViewModel.uiState` is:
+  ```kotlin
+  val uiState: StateFlow<HomeUiState> = selectedCategoryFlow
+      .flatMapLatest { category -> ... }
+      .map { items -> HomeUiState(items = items, isLoading = false) }
+  ```
+  This map is placed outside of `flatMapLatest`, meaning the `category` variable is out of scope. Because it is omitted, `selectedCategory` in `HomeUiState` falls back to its default value (`null` = "All").
+* **Reason**: Whenever the list changes or a filter is clicked, the UI state will tell Compose that the active filter is "All", visually resetting the filter chip highlights.
+* **Fix**: Map the items to `HomeUiState` inside `flatMapLatest` to preserve the active category:
+  ```kotlin
+  val uiState: StateFlow<HomeUiState> = selectedCategoryFlow
+      .flatMapLatest { category ->
+          val flow = if (category == null) repository.observeAll()
+                     else repository.observeByCategory(category)
+          flow.map { items ->
+              HomeUiState(items = items, selectedCategory = category, isLoading = false)
+          }
+      }
+      .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
+  ```
+
+### 4.2 Missing `observeById` Implementation in Repository
+* **Issue**: The `MediaRepository` interface defines `observeById(id: String): Flow<MediaItem?>`, but `MediaRepositoryImpl` (lines 925-989) fails to implement this method entirely.
+* **Reason**: The developer will experience a compile error for missing interface implementations.
+* **Fix**: Implement the method in `MediaRepositoryImpl`:
+  ```kotlin
+  override fun observeById(id: String): Flow<MediaItem?> {
+      return dao.observeById(id)
+          .map { entity ->
+              try {
+                  entity?.toDomain()
+              } catch (e: Exception) {
+                  null
+              }
+          }
+          .distinctUntilChanged()
+          .flowOn(Dispatchers.Default)
+  }
+  ```
+
+### 4.3 TotalItems Input Clamping / Empty Value Bug
+* **Issue**: The plan suggests safe Int parsing for form inputs: `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`.
+* **Reason**: While this works for `currentProgress`, if applied to `totalItems` (which is optional and can be `null`), an empty input will parse to `0` instead of `null`. If `totalItems` becomes `0`, the progress (if > 0) will be incorrectly clamped to `0`.
+* **Fix**: Allow the parsed result to be nullable for `totalItems`:
+  ```kotlin
+  val total = text.takeIf { it.isNotBlank() }
+      ?.toLongOrNull()
+      ?.coerceAtMost(Int.MAX_VALUE.toLong())
+      ?.toInt()
+  ```
+
+---
+
+## 5. Scraping & Networking
+
+### 5.1 CPU-Bound Parsing Executing on OkHttp Thread
+* **Issue**: In `MetadataScraper.scrape()`, the plan implements `suspendCancellableCoroutine` and executes `Jsoup.parse(boundedStream, ...)` directly inside the OkHttp callback thread (`onResponse`).
+* **Reason**: This directly contradicts the plan's own rule: *"Jsoup.parse() is CPU-bound and MUST run on Dispatchers.Default, NOT on OkHttp's IO dispatcher pool."*
+* **Fix**: Perform the scrape using `withContext` and a synchronous call with custom cancellation listener, then run `Jsoup.parse` on `Dispatchers.Default`:
+  ```kotlin
+  suspend fun scrape(url: String): Result<ScrapedMetadata> = withContext(Dispatchers.IO) {
+      try {
+          val request = Request.Builder().url(url).build()
+          val call = okHttpClient.newCall(request)
+          
+          currentCoroutineContext()[Job]?.invokeOnCompletion {
+              call.cancel()
+          }
+
+          call.execute().use { response ->
+              if (!response.isSuccessful) throw IOException("Unexpected code $response")
+              val body = response.body ?: throw IOException("Empty body")
+              
+              val limitStream = BoundedInputStream(body.byteStream(), MAX_SCRAPE_BYTES)
+              val doc = withContext(Dispatchers.Default) {
+                  Jsoup.parse(limitStream, "UTF-8", url)
+              }
+              
+              val title = extractTitle(doc)
+              val imageUrl = extractImageUrl(doc)
+              Result.success(ScrapedMetadata(title, imageUrl))
+          }
+      } catch (e: Exception) {
+          Result.failure(e)
+      }
+  }
+  ```
