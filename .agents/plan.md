@@ -48,14 +48,14 @@ Local-only Android media tracker for tracking consumption across Novels, Manga, 
 | Build | Gradle version catalog (`libs.versions.toml`) |
 | Min SDK | 26 |
 | Target SDK | 34 |
-| Package | `com.rockyxwall.lazydex` |
+| Package | `app.lazydex` |
 
 ---
 
 ## Architecture Overview
 
 ```
-com.rockyxwall.lazydex/
+app.lazydex/
 ├── LazyDexApp.kt              # Application class (Koin init)
 ├── MainActivity.kt             # Single Activity, sets ComposeContent
 ├── data/

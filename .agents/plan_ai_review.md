@@ -57,7 +57,7 @@ Local-only Android media tracker for tracking consumption progress across Novels
 | Build | **Gradle version catalog** (`libs.versions.toml`) | Centralized dependency management | — |
 | Min SDK | **26** (Android 8.0) | Covers 95%+ devices | — |
 | Target SDK | **34** | Latest stable | — |
-| Package | **com.rockyxwall.lazydex** | Industry standard reverse-domain | — |
+| Package | **app.lazydex** | Short, clean, matches Mihon's `app.mihon` pattern | — |
 
 ### Testing Dual-Track Decision (Resolved Contradiction)
 
@@ -73,7 +73,7 @@ Both live in the same Gradle module. The `android-junit5` plugin makes this work
 ## 3. Architecture & Project Structure
 
 ```
-com.rockyxwall.lazydex/
+app.lazydex/
 ├── LazyDexApp.kt                          # Application class (Koin init)
 ├── MainActivity.kt                        # Single Activity hosting Compose (~30 lines)
 │

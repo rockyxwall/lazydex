@@ -47,5 +47,5 @@ Local-only Android media tracker for tracking consumption progress across Novels
 | Build | **Gradle version catalog** (`libs.versions.toml`) | Centralized dependency management | — |
 | Min SDK | **26** (Android 8.0) | Matches old codebase, covers 95%+ devices | — |
 | Target SDK | **34** | Latest stable | — |
-| Package | **com.rockyxwall.lazydex** | Industry standard reverse-domain | — |
+| Package | **app.lazydex** | Short, clean, matches Mihon's `app.mihon` pattern | — |
 
