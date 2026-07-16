@@ -586,12 +586,7 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
                             return actual
                         }
                     }
-                    // Jsoup is CPU-bound — MUST run on Dispatchers.Default, not OkHttp's pool.
-                    // Use withContext instead of launching an unstructured coroutine to
-                    // avoid continuation leaks and ensure proper cancellation propagation.
-                    val doc = withContext(Dispatchers.Default) {
-                        Jsoup.parse(boundedStream, "UTF-8", url)
-                    }
+                    val doc = Jsoup.parse(boundedStream, "UTF-8", url)
                     // ... extraction logic ...
                     continuation.resume(Result.success(...))
                 } catch (e: Exception) {
@@ -600,7 +595,7 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
                     response.close()
                 }
           }
-          override fun onFailure(call: Call, e: IOException) { /* resume */ }
+          override fun onFailure(call: Call, e: IOException) { continuation.resume(Result.failure(e)) }
       })
   }
   ```
@@ -610,9 +605,19 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 ### 4.6 Backup System
 
 ```kotlin
+@Serializable
+private data class BackupEnvelope(
+    val schemaVersion: Int = 1,
+    val items: List<MediaItem>
+)
+
 object BackupProcessor {
-    suspend fun serialize(items: List<MediaItem>): String       // kotlinx.serialization JSON
-    suspend fun deserialize(json: String): List<MediaItem>
+    suspend fun serialize(items: List<MediaItem>): String =
+        Json.encodeToString(BackupEnvelope(items = items))
+
+    suspend fun deserialize(json: String): List<MediaItem> =
+        Json.decodeFromString<BackupEnvelope>(json).items
+
     suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem>
 }
 
@@ -666,7 +671,7 @@ object BackupManager {
 
 **Export Rules**:
 - Write to temp file first: `File(context.cacheDir, "temp_backup.json")`. Prevents partial-file corruption if write fails mid-way.
-- Transfer to SAF target URI via content resolver: open an output stream to the SAF URI via `context.contentResolver.openOutputStream(uri, "wt")` and copy using `tempFile.inputStream().copyTo(outputStream)`. SAF URIs use `content://` scheme — `java.io.File.renameTo()` cannot target a content URI and will throw a `SecurityException`. Use `"wt"` (write + truncate) rather than `"w"` because on some OEM Android variants, `"w"` overwrites the beginning of the file but does not truncate remaining bytes, leaving trailing garbage if the new backup is smaller than the previous one at the same URI.
+- Transfer to SAF target URI via content resolver: open an output stream to the SAF URI via `context.contentResolver.openOutputStream(uri, "wt")` (nullable — must check) and copy using `tempFile.inputStream().use { input -> outputStream.use { output -> input.copyTo(output) } }`. SAF URIs use `content://` scheme — `java.io.File.renameTo()` cannot target a content URI and will throw a `SecurityException`. Use `"wt"` (write + truncate) rather than `"w"` because on some OEM Android variants, `"w"` overwrites the beginning of the file but does not truncate remaining bytes, leaving trailing garbage if the new backup is smaller than the previous one at the same URI.
 - Delete the temporary file after successful transfer.
 - Use `BufferedWriter` with UTF-8 encoding, no BOM
 - All items are normalized before serialization (redundant but safe — they should already be normalized)
@@ -1047,7 +1052,7 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Create `data/local/entity/MediaItemEntity.kt`
 - [ ] Create `data/local/dao/MediaItemDao.kt` (with atomic increment/decrement, `@Transaction replaceAll`)
 - [ ] Create `data/local/LazyDexDatabase.kt` (exportSchema = false, WAL mode)
-- [ ] Create `data/local/converter/Converters.kt`
+- [ ] (TypeConverters not needed — enums stored as raw strings per Section 4.1 decision)
 - [ ] Create `data/repository/MediaRepositoryImpl.kt` (normalize() on every write, UUID in add only)
 - [ ] Create `util/UrlNormalizer.kt` (single canonical normalizer, used by repository + scraper)
 - [ ] Write tests for MediaRepositoryImpl (insert, read, update, delete, atomic increment/decrement, replaceAll transaction, normalize enforcement)
@@ -1246,7 +1251,7 @@ plugins {
     kotlin("plugin.serialization") version "2.0.21"
     id("com.google.devtools.ksp") version "2.0.21-1.0.28"
     id("de.mannodermaus.android-junit5") version "1.11.4.0"  // JUnit5 on Android
-    id("de.mannodermaus.junit5-ktx") version "1.11.4.0"      // Kotlin extensions for android-junit5
+    // Note: junit5-ktx is a library dependency, not a plugin — add in dependencies {} block if needed
 }
 ```
 
@@ -1398,7 +1403,7 @@ app/
 │   │   │   │   │   ├── LazyDexDatabase.kt
 │   │   │   │   │   ├── entity/MediaItemEntity.kt
 │   │   │   │   │   ├── dao/MediaItemDao.kt
-│   │   │   │   │   └── converter/Converters.kt
+│   │   │   │   │   # converter/ omitted — TypeConverters not needed (enums stored as raw strings)
 │   │   │   │   └── repository/MediaRepositoryImpl.kt
 │   │   │   ├── domain/
 │   │   │   │   ├── model/
