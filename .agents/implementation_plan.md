@@ -1,6 +1,6 @@
-# LazyDex Rebuild — Implementation Plan
+# LazyDex — Implementation Plan
 
-> **Audience**: This document is for an AI agent tasked with auditing, validating, and executing a full rebuild of the LazyDex Android application. The AI must be **merciless** — find every inconsistency, every missing edge case, every race condition, every performance trap, every deviation from best practices. Do not assume anything is correct. Verify everything. Question every decision below. If you find a flaw, flag it **and propose the proper correction** before proceeding. Every flagged issue must include a concrete, actionable fix — not just a warning. All proposed solutions must strictly follow the architectural rules, conventions, and decisions documented in this plan (e.g., domain purity, normalize() enforcement, atomic SQL, epoch-0 default, etc.). Do not suggest workarounds that bypass or contradict these requirements.
+> **Audience**: This document is for an AI agent tasked with auditing, validating, and building the LazyDex Android application. The AI must be **merciless** — find every inconsistency, every missing edge case, every race condition, every performance trap, every deviation from best practices. Do not assume anything is correct. Verify everything. Question every decision below. If you find a flaw, flag it **and propose the proper correction** before proceeding. Every flagged issue must include a concrete, actionable fix — not just a warning. All proposed solutions must strictly follow the architectural rules, conventions, and decisions documented in this plan (e.g., domain purity, normalize() enforcement, atomic SQL, epoch-0 default, etc.). Do not suggest workarounds that bypass or contradict these requirements.
 
 ---
 
@@ -51,7 +51,7 @@ Local-only Android media tracker for tracking consumption progress across Novels
 | **Unit Testing** | **JUnit 5 (Jupiter) + MockK + Turbine** | All ViewModel, Repository, Scraper tests use Jupiter | — |
 | **Compose UI Testing** | **JUnit 4 (via `ui-test-junit4`) + ComposeTestRule** | `createComposeRule()` only exists for JUnit4. Instrumented UI tests run under JUnit4 runtime via the `de.mannodermaus.android-junit5` Gradle plugin's backwards-compatible runner bridge. Pure unit tests stay on Jupiter. | — |
 | Build | **Gradle version catalog** (`libs.versions.toml`) | Centralized dependency management | — |
-| Min SDK | **26** (Android 8.0) | Matches old codebase, covers 95%+ devices | — |
+| Min SDK | **26** (Android 8.0) | Covers 95%+ devices | — |
 | Target SDK | **34** | Latest stable | — |
 | Package | **com.rockyxwall.lazydex** | Industry standard reverse-domain | — |
 
@@ -622,7 +622,7 @@ object BackupManager {
 }
 ```
 
-**Backup JSON Schema** (backward-compatible with old codebase):
+**Backup JSON Schema**:
 ```json
 {
     "schemaVersion": 1,
@@ -642,14 +642,12 @@ object BackupManager {
 }
 ```
 
-**Backward Compatibility with Old (Gson) Codebase**:
-- The old codebase used Gson with `@SerializedName` that matched the exact field names above
-- The old codebase likely did NOT write a `schemaVersion` field (it was added in the new app)
-- **Decision**: `schemaVersion` defaults to `1` when missing. This is the most important backward-compat rule — do NOT reject files missing `schemaVersion`
-- The old codebase likely did NOT write `lastUpdated` (it was added later). **Decision**: `lastUpdated` defaults to **epoch 0** (`0L`) when missing, null, or 0. NOT import time. Rationale: if untimestamped imported items got `System.currentTimeMillis()`, they'd be newer than every local item, causing merge ("keep newest") to silently clobber genuinely newer local edits. Epoch 0 means local always wins conflicts against untimestamped imports — safe default. Merge tiebreak (`local wins when timestamps equal`) then also favors local for any imported items that were also stamped 0.
-- `category` in old files may be stored as `NOVEL`, `Novel`, or `novel` — handle case-insensitively
+**Backup Format Robustness**:
+- Backups may omit `schemaVersion` entirely. **Decision**: `schemaVersion` defaults to `1` when missing. Do NOT reject files missing `schemaVersion`.
+- Backups may omit `lastUpdated`. **Decision**: `lastUpdated` defaults to **epoch 0** (`0L`) when missing, null, or 0. NOT import time. Rationale: if untimestamped imported items got `System.currentTimeMillis()`, they'd be newer than every local item, causing merge ("keep newest") to silently clobber genuinely newer local edits. Epoch 0 means local always wins conflicts against untimestamped imports — safe default. Merge tiebreak (`local wins when timestamps equal`) then also favors local for any imported items that were also stamped 0.
+- `category` may be stored as `NOVEL`, `Novel`, or `novel` — handle case-insensitively
 - `userStatus` similarly may vary — handle case-insensitively
-- The old Gson serializer used `@SerializedName(nullable = true)` for `totalItems` and `coverImageUrl` — ensure kotlinx.serialization handles nullable fields correctly
+- `totalItems` and `coverImageUrl` are nullable — ensure kotlinx.serialization handles nullable fields correctly
 
 **Deserialization Rules**:
 - `schemaVersion` missing → treat as `1`
@@ -678,7 +676,7 @@ object BackupManager {
 - For conflicts, keep the item with the newer `lastUpdated` timestamp
 - If timestamps are equal, keep local (deterministic: local wins)
 - Items only in local → keep as-is
-- Items only in imported → preserve valid timestamps from JSON; fall back to staggered timestamps only for items that lack a valid timestamp. Rationale: if the user exported their items (which have real historical timestamps), then uninstalled/reinstalled and imported the same file, every item is a "pure addition". Blindly overwriting with `System.currentTimeMillis() - index` would destroy the user's entire chronological history. The merge must check `importedItem.lastUpdated > 0L` first. For items with a valid timestamp, keep it. For items without (e.g., from the old Gson app that had no `lastUpdated` field), stamp with staggered import time: `val finalTime = if (importedItem.lastUpdated > 0L) importedItem.lastUpdated else System.currentTimeMillis() - index`.
+- Items only in imported → preserve valid timestamps from JSON; fall back to staggered timestamps only for items that lack a valid timestamp. Rationale: if the user exported their items (which have real historical timestamps), then uninstalled/reinstalled and imported the same file, every item is a "pure addition". Blindly overwriting with `System.currentTimeMillis() - index` would destroy the user's entire chronological history. The merge must check `importedItem.lastUpdated > 0L` first. For items with a valid timestamp, keep it. For items without (e.g., from a backup that had no `lastUpdated` field), stamp with staggered import time: `val finalTime = if (importedItem.lastUpdated > 0L) importedItem.lastUpdated else System.currentTimeMillis() - index`.
 - Use `LinkedHashMap` to preserve insertion order deterministically
 - Normalize all items in the merged result before returning
 - Note on result ordering: the array order from merge is consumed only by JSON export. The UI (`observeAll()` — see 4.3) always re-sorts by `ORDER BY lastUpdated DESC`, so merge's insertion order is invisible on screen. This is correct — users expect newly imported items to appear at the top of their list, not appended at the bottom.
@@ -694,7 +692,7 @@ object BackupManager {
 - `replaceAll` imports through repository — goes through `normalize()` (invariant enforcement)
 - Serialization uses kotlinx.serialization with `@SerialName` annotations if field names differ from Kotlin property names
 - Test round-trip: serialize → deserialize → serialize → compare
-- Test with actual backup file from the old Gson-based app
+- Test with actual backup file
 
 ### 4.7 UI Screens
 
@@ -1017,15 +1015,13 @@ These are **not** exhaustive. The AI must consider every scenario below and any 
 
 10. **Cover image URL that returns a redirect to a malicious site**: Coil handles redirects. Verify that Coil doesn't follow redirects to `file://` or `content://` schemes. This is a Coil security concern — check Coil's redirect policy. If needed, add a custom `Interceptor` to OkHttp client that rejects redirects to non-http schemes.
 
-11. **SharedPreferences migration**: Old app stored data in SharedPreferences. New app uses Room. No automatic migration. Users will lose old data. **Decision**: Clean break. Document in Settings about section: "This version uses a new database. Previous data is not migrated. Please export from the old version first."
+11. **Empty database on first launch**: Show empty state with friendly message: "Nothing here yet. Tap + to add your first item."
 
-12. **Empty database on first launch**: Show empty state with friendly message: "Nothing here yet. Tap + to add your first item."
+12. **System locale / RTL**: App supports RTL layouts (`supportsRtl="true"` in manifest). Compose handles this with `LocalLayoutDirection`. All paddings use `Start`/`End` not `Left`/`Right`.
 
-13. **System locale / RTL**: App supports RTL layouts (`supportsRtl="true"` in manifest). Compose handles this with `LocalLayoutDirection`. All paddings use `Start`/`End` not `Left`/`Right`.
+13. **Input method / keyboard**: Progress/Total fields show numeric keyboard (`KeyboardType.Number`). Forms handle IME actions (Next → Next → Done). Test on devices without hardware keyboard.
 
-14. **Input method / keyboard**: Progress/Total fields show numeric keyboard (`KeyboardType.Number`). Forms handle IME actions (Next → Next → Done). Test on devices without hardware keyboard.
-
-15. **Accessibility**: All interactive elements must have content descriptions (`.contentDescription()` in Compose). Buttons must be at least 48dp touch target. Color must not be the only differentiator — category and status badges use text + icon + color.
+14. **Accessibility**: All interactive elements must have content descriptions (`.contentDescription()` in Compose). Buttons must be at least 48dp touch target. Color must not be the only differentiator — category and status badges use text + icon + color.
 
 ---
 
@@ -1124,7 +1120,7 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Handle SAF export/import launchers (in Composable, not ViewModel)
 - [ ] Import conflict dialog (merge vs overwrite)
 - [ ] About section with version info
-- [ ] **AI must verify**: Export creates valid JSON, import reads old Gson format, schemaVersion missing defaults to 1, merge is deterministic, overwrite is atomic via @Transaction, error cases (corrupt file, empty file, permissions) handled
+- [ ] **AI must verify**: Export creates valid JSON, import reads backup format, schemaVersion missing defaults to 1, merge is deterministic, overwrite is atomic via @Transaction, error cases (corrupt file, empty file, permissions) handled
 
 ### Phase 10: Navigation
 - [ ] Create `ui/navigation/NavGraph.kt`
@@ -1135,7 +1131,7 @@ The AI MUST follow this order. Each phase depends on the previous one.
 ### Phase 11: Polish & Testing
 - [ ] Write ViewModel unit tests (MockK for repository, verify state changes, one-shot events)
 - [ ] Write scraper integration tests (MockWebServer)
-- [ ] Write backup processor tests (round-trip, merge edge cases, backward compat with old Gson format)
+- [ ] Write backup processor tests (round-trip, merge edge cases, backward compat)
 - [ ] Write Compose UI tests (createComposeRule, JUnit4 runner) — at least one per screen
 - [ ] Accessibility audit
 - [ ] Performance profiling (DB queries, list scrolling, image loading)
@@ -1355,7 +1351,7 @@ Both tracks coexist via the `de.mannodermaus.android-junit5` plugin. The plugin 
 
 23. **Don't blindly upgrade `og:image` from `http://` to `https://`** or add a HEAD check. Keep the URL as-scraped. Coil handles http images fine. HEAD checks add latency and many servers reject them.
 
-24. **Don't reject backup files missing `schemaVersion`**. Default to version 1 for backward compatibility with the old Gson-based app.
+24. **Don't reject backup files missing `schemaVersion`**. Default to version 1 so old backups load correctly.
 
 ---
 
@@ -1377,30 +1373,9 @@ These questions have been audited and resolved. The answers below are definitive
 12. **Merge order**: Local first, imported second. A `LinkedHashMap` keyed by UUID naturally appends new imported items after existing local ones, preserving deterministic order before DB re-sorts by `lastUpdated`.
 13. **coil-network-okhttp + OkHttp 4.12.0**: Yes, compatible. Coil 3.x supports OkHttp 4.x and 5.x seamlessly.
 14. **android-junit5 vs compose/KSP plugins**: No conflict. KSP generates code, Compose plugin transforms IR, JUnit5 hooks testing runtime — different build phases.
-15. **@SerialName for backup JSON**: **No**. The old Gson format used `"id"`, not `"_id"`. Keep the Kotlin property as `val id: String` without renaming for seamless backward compatibility.
+15. **@SerialName for backup JSON**: **No**. The backup format uses `"id"`, not `"_id"`. Keep the Kotlin property as `val id: String` without renaming.
 
 ---
-
-## Appendix A: Comparison with Old Codebase
-
-| Aspect | Old (Trash) | New (Good) |
-|--------|-------------|------------|
-| Storage | SharedPreferences JSON blob | Room SQLite + Flow + WAL |
-| UI | XML layouts + ViewBinding | Jetpack Compose + Material3 |
-| Architecture | God Activity (493 lines) | MVVM + Repository |
-| DI | Manual wiring | Koin |
-| Serialization | Gson (reflection) | kotlinx.serialization (compile-time) |
-| Scraping | OkHttp + Jsoup + WebView (memory bloat) | OkHttp + Jsoup only (no WebView) |
-| Image loading | Glide (Java-first) | Coil (Kotlin-native, Compose) |
-| State | MutableList in Activity | StateFlow in ViewModel |
-| Increment/decrement | Read-modify-write (race condition) | Atomic SQL UPDATE (no race) |
-| Bulk replace | Not atomic (data loss possible) | @Transaction (rollback on failure) |
-| Invariant enforcement | None (data could become corrupt) | normalize() on every write path |
-| Testing | 1 test file | Full unit suite (JUnit5) + UI tests (JUnit4) |
-| Configuration | Hardcoded JDK path, missing proguard | Clean build config |
-| Navigation | Implicit (dialogs everywhere) | Navigation Compose |
-| Error handling | Catch Exception silently | Per-layer error handling |
-| Import compat | N/A | Reads old Gson format (missing schemaVersion → defaults to 1) |
 
 ---
 
@@ -1496,4 +1471,4 @@ gradlew.bat
 
 ---
 
-> **Final Instruction to AI**: Do not proceed until you have audited every section above. If you find ambiguities, contradictions, missing edge cases, or design flaws, flag them and propose corrections before writing any code. Be merciless. The old codebase was garbage. This one must not be.
+> **Final Instruction to AI**: Do not proceed until you have audited every section above. If you find ambiguities, contradictions, missing edge cases, or design flaws, flag them and propose corrections before writing any code. Be merciless.
