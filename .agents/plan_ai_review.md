@@ -7,29 +7,33 @@
 ## 1. Project Overview
 
 ### Purpose
-Local-only Android media tracker for tracking consumption progress across Novels, Anime, Manga, and Games. No accounts, no cloud, no social. Privacy-first.
+Local-only Android media tracker for tracking consumption progress across Novels, Manga, Anime, Games, Movies, and TV Shows. No accounts, no cloud, no social. Privacy-first.
 
 ### Core Features
-- Add media items via URL scraping (metadata auto-fill) or manual entry
-- Track progress (current chapter/episode/volume) with optional total
-- Toggle status: Reading / Completed
-- View all items in a filterable list (by category)
-- Tap item to open source URL in external browser
-- Edit and delete items
-- Backup/restore data to JSON files via Storage Access Framework (SAF)
-- Merge or overwrite on import
-- Dark theme with dynamic color support (Android 12+)
-- Proper Settings screen (export, import, about)
+1. Manual entry — URL scrape (novels) or AniList/MAL search (anime/manga) as auto-fill options inside the add form
+   - v1.0: manual entry + URL scraping for novels
+   - Post-v1.0: AniList/MyAnimeList search (metadata fetch, no login)
+   - Future: full AniList/MAL sync (OAuth, two-way progress/status sync)
+2. Track progress (simple Int current + optional Int total; unit label derived from category)
+3. Toggle status: 5 statuses (Reading/Watching/Playing, Completed, On Hold, Dropped, Plan to) — display label adapts to category
+4. View all items in a filterable list (by category and status)
+5. Tap item → detail screen (title, cover, progress controls, status, notes, source URL button, edit/delete)
+6. Edit and delete items — inline editing on detail screen (edit in place + save), delete with confirmation
+7. Backup/restore data to JSON via SAF + auto-backup (scheduled, like Mihon's .mihonbk)
+8. Merge or overwrite on import
+9. Dark theme (default) + Light toggle in settings + dynamic color (Monet, Android 12+) + fallback palette (older Android) + Amoled mode option
+10. Settings screen — Data (export, import), Theme (dark/light toggle, amoled mode), Backup (auto-backup schedule), About (version, credits, licenses)
 
 ### Non-Goals
-- No user accounts
-- No cloud sync
+- No user accounts (v1.0)
+- No cloud sync (v1.0)
 - No social features
-- No login/authentication
+- No login/authentication (v1.0)
 - No multi-device support
 - No extension/plugin system
 - No push notifications
 - No widget
+- Note: AniList/MyAnimeList sync (OAuth) is planned as a post-v1.0 feature, not in-scope for initial release.
 
 ---
 
@@ -100,20 +104,20 @@ com.rockyxwall.lazydex/
 │   ├── home/
 │   │   ├── HomeScreen.kt                   # Main list + filter chips + FAB
 │   │   └── HomeViewModel.kt
+│   ├── detail/
+│   │   ├── DetailScreen.kt                 # Detail view + inline editing
+│   │   └── DetailViewModel.kt
 │   ├── add/
 │   │   ├── AddItemScreen.kt                # Bottom sheet: URL scrape + manual form
 │   │   └── AddItemViewModel.kt
-│   ├── edit/
-│   │   ├── EditItemScreen.kt               # Full edit form
-│   │   └── EditItemViewModel.kt
 │   ├── settings/
-│   │   ├── SettingsScreen.kt               # Export, import, about
+│   │   ├── SettingsScreen.kt               # Data, Theme, Backup, About
 │   │   └── SettingsViewModel.kt
 │   └── components/
 │       ├── MediaCard.kt                    # Single item card
 │       ├── CategoryFilterChips.kt          # Filter row
 │       ├── CategoryBadge.kt                # Color-coded category label
-│       ├── StatusBadge.kt                  # Reading/Completed label
+│       ├── StatusBadge.kt                  # Reading/Watching/Playing/Completed/On Hold/Dropped/Plan to label
 │       ├── ProgressControls.kt             # Increment/decrement buttons
 │       └── EmptyState.kt                   # "Nothing here yet" placeholder
 │
@@ -156,9 +160,11 @@ com.rockyxwall.lazydex/
 // domain/model/MediaCategory.kt
 enum class MediaCategory(val displayName: String) {
     NOVEL("Novel"),
-    ANIME("Anime"),
     MANGA("Manga"),
-    GAME("Game");
+    ANIME("Anime"),
+    GAME("Game"),
+    MOVIE("Movie"),
+    TV("TV");
 
     companion object {
         /** Case-insensitive lookup. Returns null for unknown values. */
@@ -170,7 +176,12 @@ enum class MediaCategory(val displayName: String) {
 // domain/model/UserStatus.kt
 enum class UserStatus(val displayName: String) {
     READING("Reading"),
-    COMPLETED("Completed");
+    WATCHING("Watching"),
+    PLAYING("Playing"),
+    COMPLETED("Completed"),
+    ON_HOLD("On Hold"),
+    DROPPED("Dropped"),
+    PLAN_TO("Plan to");
 
     companion object {
         /** Case-insensitive lookup. Returns null for unknown values. */
@@ -189,6 +200,7 @@ data class MediaItem(
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
     val userStatus: UserStatus,
+    val notes: String = "",      // User notes/annotations
     val lastUpdated: Long        // System.currentTimeMillis()
 ) {
     /**
@@ -210,7 +222,8 @@ data class MediaItem(
             sourceUrl = UrlNormalizer.normalize(sourceUrl),
             coverImageUrl = coverImageUrl.trim(),
             totalItems = safeTotal,
-            currentProgress = safeProgress
+            currentProgress = safeProgress,
+            notes = notes.trim()
         )
     }
 }
@@ -229,6 +242,7 @@ data class MediaItemEntity(
     val currentProgress: Int,
     val totalItems: Int?,
     val userStatus: String,      // Stored as uppercase string (e.g. "READING")
+    val notes: String,
     val lastUpdated: Long
 )
 ```
@@ -278,7 +292,7 @@ interface MediaItemDao {
     @Query("SELECT COUNT(*) FROM media_items")
     fun observeCount(): Flow<Int>
 
-    // Reactive single-item observation (used by EditItemViewModel)
+    // Reactive single-item observation (used by DetailViewModel)
     @Query("SELECT * FROM media_items WHERE id = :id")
     fun observeById(id: String): Flow<MediaItemEntity?>
 
@@ -373,7 +387,7 @@ Note: `@Transaction` on an interface default method works because Room generates
 **AI Verification Checklist**:
 - `observeAll()` returns `Flow` — Room runs this on a background thread automatically
 - `observeByCategory()` filters by category string — must match uppercase enum names ("NOVEL", "ANIME", etc.)
-- `observeById()` returns `Flow<MediaItemEntity?>` — used by EditItemViewModel to reactively observe the latest data from Room without passing the full domain model through navigation arguments
+- `observeById()` returns `Flow<MediaItemEntity?>` — used by DetailViewModel to reactively observe the latest data from Room without passing the full domain model through navigation arguments
 - `atomicIncrement` and `atomicDecrement` use single SQL UPDATE statements — no read-modify-write race condition possible. This makes the "rapid tap" race condition a non-issue. The user can tap [+] 100 times and every increment is individually atomic
 - `updateStatus` is also a single atomic SQL UPDATE — no race condition
 - `replaceAll` is annotated with `@Transaction` and calls `deleteAll()` + `upsertAll()` in the right order. If the process dies mid-transaction, Room rolls back — no data loss
@@ -387,7 +401,7 @@ interface MediaRepository {
     /** Reactive observation — UI bindings */
     fun observeAll(): Flow<List<MediaItem>>
     fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>>
-    fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for EditItemViewModel
+    fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for DetailViewModel
 
     /** One-shot reads */
     suspend fun getById(id: String): MediaItem?
@@ -693,6 +707,7 @@ object BackupManager {
 - Delete the temporary file after successful transfer.
 - Use `BufferedWriter` with UTF-8 encoding, no BOM
 - All items are normalized before serialization (redundant but safe — they should already be normalized)
+- **Auto-backup**: Optional scheduled backup via WorkManager (daily/weekly). Exports to app-internal storage with timestamped filenames. User configures schedule in Settings.
 
 **Merge Logic**:
 - Keyed by `id` (UUID string)
@@ -721,15 +736,15 @@ object BackupManager {
 
 #### HomeScreen
 - TopAppBar with title "LazyDex" and settings gear icon
-- Filter chips row: [All] [Novels] [Anime] [Manga] [Games] — single selection, "All" by default
+- Filter chips row: [All] [Novels] [Manga] [Anime] [Games] [Movies] [TV] — single selection, "All" by default
+- Secondary filter chips (optional): status filter — [All] [Reading] [Completed] [On Hold] [Dropped] [Plan to]
 - LazyColumn of MediaCards, or EmptyState when list is empty
 - FAB: + icon to open AddItemSheet
 - Each card shows: cover image (async via Coil), title, category badge, status badge, progress (current/total), last updated relative time, increment [+] / decrement [-] buttons
-- Tap card body → open source URL in external browser
-- Tap status badge → toggle Reading/Completed (with popup or inline toggle)
+- Tap card body → navigate to DetailScreen
 - Tap [+] → increment progress (atomic — goes to repository, no need to read current value)
 - Tap [-] → decrement progress (atomic)
-- Long press card → context menu: Edit / Delete
+- Long press card → context menu: Edit (→ DetailScreen) / Delete
 
 **State Management**:
 ```kotlin
@@ -745,7 +760,7 @@ sealed interface HomeEvent {
     data class ToggleStatus(val itemId: String) : HomeEvent
     data class SelectCategory(val category: MediaCategory?) : HomeEvent
     data class OpenItem(val url: String) : HomeEvent
-    data class EditItem(val item: MediaItem) : HomeEvent
+    data class OpenDetail(val itemId: String) : HomeEvent
     data class DeleteItem(val item: MediaItem) : HomeEvent
 }
 ```
@@ -797,27 +812,29 @@ class HomeViewModel(
 **AI Verification Checklist**:
 - Increment/decrement go through repository atomic SQL — no race condition. No debounce needed. Rapid taps are safe.
 - `openItem` emits a one-shot event via `Channel<HomeEvent>` (not StateFlow) — handled by Activity to start an `Intent.ACTION_VIEW`. **Spam-click protection**: `openItem()` debounces by dropping events within a 500ms window of the last emission to prevent multiple overlapping browser intents
-- Long press → Edit navigates to EditItemScreen. Delete shows a confirmation dialog (Composable dialog, not AlertDialog)
+- Long press → Edit navigates to DetailScreen. Delete shows a confirmation dialog (Composable dialog, not AlertDialog)
 - Relative time display: calculate at render time inside the Composable. It's not a live clock — "5m ago" being 6m ago is acceptable.
 - Cover image: `AsyncImage` from Coil with placeholder and error drawables. If `coverImageUrl` is empty, don't load anything.
 - Card click: use `LocalContext.current` to start an Activity. Never pass Context to ViewModel.
 - FAB click: navigate to AddItemScreen (bottom sheet route).
 
 #### AddItemScreen (Bottom Sheet)
-- URL input field with a "Scrape" button
-- Category selector chips (Novel, Anime, Manga, Game)
+- Manual entry form as the primary interface
+- URL input field with an "Auto-fill" button (scrapes URL for novels)
+- Category selector chips (Novel, Manga, Anime, Game, Movie, TV)
 - Title text field
 - Cover image URL text field
 - Progress input (number) + Total input (number, optional)
+- Notes field (optional)
 - Cancel and Add buttons
 
 **Flow**:
-1. User enters URL → taps Scrape
-2. Show loading state on scrape button, disable form fields
+1. User fills in fields manually, optionally enters URL and taps "Auto-fill"
+2. Show loading state on auto-fill button, disable form fields during scrape
 3. ViewModel calls `scraper.scrape(url)` via ViewModelScope
 4. Success: auto-fill Title and Cover URL fields, re-enable form
 5. Failure: show inline error message below URL input ("Could not auto-fill, please enter manually"), keep form enabled
-6. User can also ignore scrape entirely and fill manually
+6. User can also ignore auto-fill entirely and fill all fields manually
 7. User taps Add → validate form → create MediaItem → save to repository → navigate back
 
 **Validation Rules** (shared by Add and Edit, except where noted):
@@ -828,7 +845,7 @@ class HomeViewModel(
 - Progress >= 0 (default 0)
 - Total must be >= 0 if provided (null = unknown)
 - **AddItemScreen**: If progress > total and total is not null → show validation error ("Progress cannot exceed total"). Block the save. Rationale: new items have no prior state, so blocking catches the mistake early.
-- **EditItemScreen**: Client-side clamp progress on blur (cap to total), show inline hint ("Capped to 100"). Do NOT block save. Rationale: the user may have other changes to save and shouldn't be forced to fix progress first. The repository's `normalize()` is still the authoritative enforcement.
+- **DetailScreen**: Client-side clamp progress on blur (cap to total), show inline hint ("Capped to 100"). Do NOT block save. Rationale: the user may have other changes to save and shouldn't be forced to fix progress first. The repository's `normalize()` is still the authoritative enforcement.
 
 **AI Verification Checklist**:
 - Scrape is cancellable via ViewModelScope — if user dismisses bottom sheet during scrape, coroutine is cancelled
@@ -840,22 +857,24 @@ class HomeViewModel(
 - Progress/Total text fields accept only numeric input (`KeyboardType.Number`). **CRITICAL: Safe Int parsing required**. A user leaning on the "9" key or pasting `"999999999999"` will exceed `Int.MAX_VALUE`, and `text.toInt()` will throw `NumberFormatException` and crash. Always parse as `Long` first, clamp to `Int.MAX_VALUE`, then cast down. For `currentProgress` (non-nullable): `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`. For `totalItems` (nullable): `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()` — empty input stays `null`.
 - URL validation on both scrape tap AND submit (user might skip scraping and enter a URL manually)
 
-#### EditItemScreen
-- Full screen with toolbar "Edit Item" + back arrow
+#### DetailScreen (Inline Editing)
+- Full screen with toolbar "Details" + back arrow
 - Cover image preview (larger than card)
-- Title text field (pre-filled)
-- Category chip selector (pre-selected)
-- Progress + Total inputs (pre-filled)
-- Status: Reading / Completed toggle
+- Title text field (editable, auto-saves or has save button)
+- Category chip selector (editable)
+- Progress + Total inputs (editable)
+- Status: dropdown/chips with all 5 statuses (Reading, Completed, On Hold, Dropped, Plan to)
+- Notes field (editable)
 - Source URL (editable — user might have entered a wrong URL initially)
+- "Open URL" button to launch external browser
 - Delete button in toolbar (with confirmation dialog)
-- Save button (floating or in toolbar)
+- Save button (floating or in toolbar) — commits all changes
 
 **AI Verification Checklist**:
 - Editing the source URL is allowed. No stale-data warning needed — if the user changes the URL, the cover/title may become stale, but that's the user's choice.
-- Edit mode is identified by passing **only the `id` (String)** as the nav argument — NOT the full `MediaItem` object. Navigation Compose serializes arguments into `SavedStateHandle` bundles; passing domain models (with URLs containing special chars) can break route parsing or hit `TransactionTooLargeException`. It also creates a stale disconnected copy of the item, violating the repository-as-SSOF rule.
-- The route argument is `EditItemRoute(val id: String)` (a `@Serializable` data class).
-- The `EditItemViewModel` observes the `id` from `SavedStateHandle` via `getStateFlow<String>("id", "")` and `flatMapLatest`s into `repository.observeById(id)` — always working with the latest data from Room.
+- DetailScreen is identified by passing **only the `id` (String)** as the nav argument — NOT the full `MediaItem` object. Navigation Compose serializes arguments into `SavedStateHandle` bundles; passing domain models (with URLs containing special chars) can break route parsing or hit `TransactionTooLargeException`. It also creates a stale disconnected copy of the item, violating the repository-as-SSOF rule.
+- The route argument is `DetailRoute(val id: String)` (a `@Serializable` data class).
+- The `DetailViewModel` observes the `id` from `SavedStateHandle` via `getStateFlow<String>("id", "")` and `flatMapLatest`s into `repository.observeById(id)` — always working with the latest data from Room.
 - On save, calls `repository.update()`.
 - Must update `lastUpdated` on save (done by repository).
 - Delete shows confirmation dialog: "Delete 'Title'? This cannot be undone."
@@ -866,8 +885,10 @@ class HomeViewModel(
 #### SettingsScreen
 - Toolbar "Settings" with back arrow
 - Sections:
-  - **Backup**: Export button, Import button
-  - **About**: App name + version string, "Built with Kotlin & Jetpack Compose"
+  - **Data**: Export button, Import button
+  - **Theme**: Dark/Light toggle, Amoled mode toggle
+  - **Backup**: Auto-backup schedule setting
+  - **About**: App name + version string, "Built with Kotlin & Jetpack Compose", Open source licenses
 
 **Export Flow**:
 1. Tap Export → SAF CreateDocument launcher (suggest "lazydex_backup.json")
@@ -901,6 +922,7 @@ class HomeViewModel(
 fun LazyDexTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,  // Android 12+
+    amoledMode: Boolean = false,   // True black backgrounds
     content: @Composable () -> Unit
 )
 ```
@@ -908,11 +930,12 @@ fun LazyDexTheme(
 **Requirements**:
 - Dynamic color on Android 12+ (Monet / Material You)
 - Fallback to custom light/dark palettes on older versions
-- Dark mode follows system setting by default
+- Dark mode follows system setting by default, toggle in settings
+- Amoled mode option: uses pure black (#000000) backgrounds when enabled
 - All Material3 components used consistently (MaterialCard, Material3 buttons, etc.)
 - Surface colors, background colors, card colors follow Material3 spec
-- Category colors (Novel=blue, Anime=red, Manga=green, Game=purple) — use from `Color.kt` not theme
-- Status colors (Reading=blue, Completed=green)
+- Category colors (Novel=blue, Manga=green, Anime=red, Game=purple, Movie=orange, TV=teal) — use from `Color.kt` not theme
+- Status colors (Reading/Watching/Playing=blue, Completed=green, On Hold=yellow, Dropped=red, Plan to=gray)
 - Badge backgrounds should be semi-transparent versions of the badge text color
 
 **AI Verification Checklist**:
@@ -920,7 +943,7 @@ fun LazyDexTheme(
 - Fallback palettes must have sufficient contrast (WCAG AA: 4.5:1 for normal text, 3:1 for large text)
 - Category and status colors must be accessible
 - Use `MaterialTheme.colorScheme` for all standard colors — never hardcode values in components
-- Surface colors in dark mode: use dark gray (#1E1E1E or similar), never pure black (#000000) to avoid eye strain on AMOLED. Pure black is acceptable only if the user explicitly chooses an "AMOLED dark" mode
+- Surface colors in dark mode: use dark gray (#1E1E1E or similar), never pure black (#000000) to avoid eye strain on AMOLED. Pure black is acceptable only if the user explicitly chooses an "AMOLED dark" mode (amoledMode = true)
 - Badge background: use `Color.copy(alpha = 0.15f)` of the text color for a pill-shaped background
 
 ### 4.9 Error Handling Strategy
@@ -1117,12 +1140,14 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Duplicate URL detection (using UrlNormalizer)
 - [ ] **AI must verify**: Scrape works with real URLs, form validates correctly, scrape cancellation works, orientation change preserves form state, no UUID generation in ViewModel
 
-### Phase 8: Edit Item Screen
-- [ ] Create `ui/edit/EditItemViewModel.kt`
-- [ ] Create `ui/edit/EditItemScreen.kt`
+### Phase 8: Detail Screen (Inline Editing)
+- [ ] Create `ui/detail/DetailViewModel.kt`
+- [ ] Create `ui/detail/DetailScreen.kt`
 - [ ] Pre-populate with existing data
-- [ ] Handle save (goes through normalize()), delete with confirmation
-- [ ] **AI must verify**: Editing works, delete works, all fields modifiable, source URL is editable, lastUpdated updates on save
+- [ ] Inline editing: edit fields in place, save button calls repository.update()
+- [ ] Delete with confirmation dialog
+- [ ] Source URL button to open in external browser
+- [ ] **AI must verify**: Editing works, delete works, all fields modifiable, source URL is editable, lastUpdated updates on save, no separate edit screen needed
 
 ### Phase 9: Settings Screen
 - [ ] Create `backup/BackupProcessor.kt` + tests (round-trip, merge, schema version default 1, case-insensitive enums)
@@ -1131,8 +1156,10 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Create `ui/settings/SettingsScreen.kt`
 - [ ] Handle SAF export/import launchers (in Composable, not ViewModel)
 - [ ] Import conflict dialog (merge vs overwrite)
-- [ ] About section with version info
-- [ ] **AI must verify**: Export creates valid JSON, import reads backup format, schemaVersion missing defaults to 1, merge is deterministic, overwrite is atomic via @Transaction, error cases (corrupt file, empty file, permissions) handled
+- [ ] Theme section: dark/light toggle, amoled mode toggle
+- [ ] Backup section: auto-backup schedule setting
+- [ ] About section with version info, credits, open source licenses
+- [ ] **AI must verify**: Export creates valid JSON, import reads backup format, schemaVersion missing defaults to 1, merge is deterministic, overwrite is atomic via @Transaction, error cases (corrupt file, empty file, permissions) handled, theme toggles persist, auto-backup schedule works
 
 ### Phase 10: Navigation
 - [ ] Create `ui/navigation/NavGraph.kt`
@@ -1298,7 +1325,7 @@ Both tracks coexist via the `de.mannodermaus.android-junit5` plugin. The plugin 
 | MetadataScraper | URL validation, successful scrape, various error responses (timeout, 404, empty body, malformed HTML) | JUnit5 + MockWebServer |
 | HomeViewModel | Filtering, increment/decrement events, state mapping, one-shot events via Channel | JUnit5 + MockK + Turbine |
 | AddItemViewModel | Form validation, scrape flow states, duplicate detection, form state preservation | JUnit5 + MockK + Turbine |
-| EditItemViewModel | Load existing item, save changes, delete | JUnit5 + MockK + Turbine |
+| DetailViewModel | Load existing item, save changes, delete | JUnit5 + MockK + Turbine |
 
 ### Compose UI Tests (Instrumented, Nice to Have)
 - Compose UI tests for key flows: add item form validation, edit item save, filter list interaction
@@ -1430,9 +1457,9 @@ app/
 │   │   │   │   ├── add/
 │   │   │   │   │   ├── AddItemScreen.kt
 │   │   │   │   │   └── AddItemViewModel.kt
-│   │   │   │   ├── edit/
-│   │   │   │   │   ├── EditItemScreen.kt
-│   │   │   │   │   └── EditItemViewModel.kt
+│   │   │   │   ├── detail/
+│   │   │   │   │   ├── DetailScreen.kt
+│   │   │   │   │   └── DetailViewModel.kt
 │   │   │   │   ├── settings/
 │   │   │   │   │   ├── SettingsScreen.kt
 │   │   │   │   │   └── SettingsViewModel.kt
@@ -1460,7 +1487,7 @@ app/
 │   │   ├── backup/BackupProcessorTest.kt
 │   │   ├── ui/home/HomeViewModelTest.kt
 │   │   ├── ui/add/AddItemViewModelTest.kt
-│   │   └── ui/edit/EditItemViewModelTest.kt
+│   │   └── ui/detail/DetailViewModelTest.kt
 │   └── androidTest/kotlin/com/rockyxwall/lazydex/
 │       └── ui/ (Compose UI tests)
 │           ├── HomeScreenTest.kt
