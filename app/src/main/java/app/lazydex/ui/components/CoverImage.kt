@@ -19,7 +19,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.coil3.compose.AsyncImage
+import coil3.compose.AsyncImage
 import java.io.File
 
 @Composable

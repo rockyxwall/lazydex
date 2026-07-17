@@ -10,7 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.Dns
-import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.Buffer
@@ -93,7 +93,7 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
     private fun validateUrl(url: String): Boolean {
         if (!url.startsWith("https://", ignoreCase = true)) return false
         if (url.length > 2048) return false
-        val host = HttpUrl.parse(url)?.host ?: return false
+        val host = url.toHttpUrlOrNull()?.host ?: return false
         // Reject direct IP addresses (v4/v6)
         if (host.matches(Regex("""^(\d{1,3}\.){3}\d{1,3}$""")) || host.startsWith("[") && host.endsWith("]")) return false
         return true

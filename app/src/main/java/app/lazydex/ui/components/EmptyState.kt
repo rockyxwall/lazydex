@@ -24,7 +24,7 @@ fun EmptyState(
     onActionClick: (() -> Unit)? = null
 ) {
     Column(
-        horizontalAlignment = Alignment.CenterVertically,
+        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = modifier
             .fillMaxWidth()

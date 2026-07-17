@@ -1,6 +1,6 @@
 package app.lazydex.util
 
-import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object UrlNormalizer {
     /**
@@ -13,7 +13,7 @@ object UrlNormalizer {
      */
     fun normalize(url: String): String {
         val trimmed = url.trim()
-        val httpUrl = HttpUrl.parse(trimmed) ?: return trimmed
+        val httpUrl = trimmed.toHttpUrlOrNull() ?: return trimmed
         return httpUrl.newBuilder()
             .fragment(null)
             .build()
