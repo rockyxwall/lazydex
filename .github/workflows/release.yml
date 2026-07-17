@@ -190,7 +190,44 @@ jobs:
         with:
           tag_name: ${{ needs.prepare-build.outputs.VERSION_TAG }}
           name: LazyDex ${{ needs.prepare-build.outputs.VERSION_TAG }}
-          body: ""
+          body: |
+            You are a release notes generator. Given a list of raw git commit messages below, produce structured release notes following this format.
+
+            ## Rules
+
+            1. Categorize every commit into ONE of these sections (in this order):
+               - ✨ **New Features** — feat:, add, new, implement, support
+               - ⚙️ **Changes** — chore:, refactor:, migrate, rename, config, build system, CI/CD
+               - 🚀 **Improvements** — enhance, optimize, improve, better, update, redesign
+               - 🧩 **Fixes** — fix:, resolve, correct, patch, hotfix
+
+            2. Each bullet starts with past-tense verb: Added, Fixed, Improved, Switched, Introduced, Removed, Updated, Renamed, Migrated, Changed.
+
+            3. End every bullet with author attribution: `(@user)`.
+
+            4. Merge similar commits by same author. Remove noise (typo fixes, formatting, merge commits, wip/tmp).
+
+            5. Sort within each section: most user-impactful first.
+
+            6. Omit any section with zero items.
+
+            ## Output format
+
+            ✨ **New Features**
+            - <Verb> <what> (@user)
+
+            ⚙️ **Changes**
+            - <Verb> <what> (@user)
+
+            🚀 **Improvements**
+            - <Verb> <what> (@user)
+
+            🧩 **Fixes**
+            - Fixed <what> (@user)
+
+            ## Raw commits
+
+            ${{ needs.prepare-build.outputs.COMMIT_LOGS }}
           files: |
             lazydex-${{ needs.prepare-build.outputs.VERSION_TAG }}.apk
           draft: true
