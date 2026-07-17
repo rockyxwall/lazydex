@@ -211,23 +211,28 @@ jobs:
 
             6. Omit any section with zero items.
 
-            7. Start with a brief 1-sentence summary of what this release does and why.
+            7. Start with a `##` heading followed by a brief 1-sentence summary of what this release does and why.
+
+            8. End with a `### 📜 **Full Changelog**` section containing a blockquote link: `> [owner/repo@prev...tag](https://github.com/owner/repo/compare/prev...tag)`
 
             ## Output format
 
-            <1-sentence summary>
+            ## <1-sentence summary>
 
-            ✨ **New**
+            ### ✨ **New**
             - <Verb> <what> (@user)
 
-            🧩 **Fixes**
+            ### 🧩 **Fixes**
             - Fixed <what> (@user)
 
-            ⚙️ **Changes**
+            ### ⚙️ **Changes**
             - <Verb> <what> (@user)
 
-            🚀 **Improvements**
+            ### 🚀 **Improvements**
             - <Verb> <what> (@user)
+
+            ### 📜 **Full Changelog**
+            > [owner/repo@prev...tag](https://github.com/owner/repo/compare/prev...tag)
 
             ## Raw commits
 
