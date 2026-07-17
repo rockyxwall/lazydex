@@ -26,8 +26,8 @@ Local-only Android media tracker for tracking consumption progress across Novels
 2. Track progress (simple Int current + optional Int total; unit label derived from category)
 3. Toggle status: 5 statuses (Reading/Watching/Playing, Completed, On Hold, Dropped, Plan to) — display label adapts to category
 4. View all items in a filterable list (by category and status)
-5. Tap item → detail screen (title, cover, progress controls, status, notes, source URL button, edit/delete)
-6. Edit and delete items — inline editing on detail screen (edit in place + save), delete with confirmation
+5. Tap item → UnifiedAddEditScreen (edit mode: title, cover, progress, status, alt titles, rating, notes, source URL, delete)
+6. Edit and delete items — inline editing on UnifiedAddEditScreen (edit in place + save), delete with confirmation
 7. Backup/restore data to JSON via SAF + auto-backup (scheduled, like Mihon's .mihonbk)
 8. Merge or overwrite on import
 9. Dark theme (default) + Light toggle in settings + dynamic color (Monet, Android 12+) + fallback palette (older Android) + Amoled mode option
@@ -88,7 +88,7 @@ app.lazydex/
 │
 ├── data/
 │   ├── local/
-│   │   ├── LazyDexDatabase.kt              # Room database (exportSchema = false for v1)
+│   │   ├── LazyDexDatabase.kt              # Room database (exportSchema = true, baseline tracked)
 │   │   ├── entity/MediaItemEntity.kt       # Room entity
 │   │   ├── dao/MediaItemDao.kt             # DAO with Flow queries + atomic increment/decrement
 │   │   └── converter/Converters.kt         # Type converters
@@ -98,8 +98,8 @@ app.lazydex/
 ├── domain/
 │   ├── model/
 │   │   ├── MediaItem.kt                    # Domain model + normalize()
-│   │   ├── MediaCategory.kt                # NOVEL, ANIME, MANGA, GAME
-│   │   └── UserStatus.kt                   # READING, COMPLETED
+│   │   ├── MediaCategory.kt                # NOVEL, MANGA, ANIME, GAME, MOVIE, TV
+│   │   └── UserStatus.kt                   # READING, WATCHING, PLAYING, COMPLETED, ON_HOLD, DROPPED, PLAN_TO
 │   └── repository/
 │       └── MediaRepository.kt              # Interface (contract)
 │
@@ -113,22 +113,22 @@ app.lazydex/
 │   ├── home/
 │   │   ├── HomeScreen.kt                   # Main list + filter chips + FAB
 │   │   └── HomeViewModel.kt
-│   ├── detail/
-│   │   ├── DetailScreen.kt                 # Detail view + inline editing
-│   │   └── DetailViewModel.kt
-│   ├── add/
-│   │   ├── AddItemScreen.kt                # Bottom sheet: URL scrape + manual form
-│   │   └── AddItemViewModel.kt
+│   ├── addedit/
+│   │   ├── UnifiedAddEditScreen.kt          # Single screen: Add + Edit modes
+│   │   └── UnifiedAddEditViewModel.kt
 │   ├── settings/
 │   │   ├── SettingsScreen.kt               # Data, Theme, Backup, About
 │   │   └── SettingsViewModel.kt
 │   └── components/
-│       ├── MediaCard.kt                    # Single item card
-│       ├── CategoryFilterChips.kt          # Filter row
-│       ├── CategoryBadge.kt                # Color-coded category label
-│       ├── StatusBadge.kt                  # Reading/Watching/Playing/Completed/On Hold/Dropped/Plan to label
-│       ├── ProgressControls.kt             # Increment/decrement buttons
-│       └── EmptyState.kt                   # "Nothing here yet" placeholder
+│       ├── MediaCard.kt                    # Single item card (READ-ONLY)
+│       ├── FilterBottomSheet.kt            # Category + status filter bottom sheet
+│       ├── SortBottomSheet.kt              # Sort options bottom sheet
+│       ├── CategoryBadge.kt                # Outline + icon badge (no color fill)
+│       ├── StatusBadge.kt                  # Color-filled status pill
+│       ├── StarRating.kt                   # Tappable 1.0–5.0 stars (half-star)
+│       ├── AltTitleEditor.kt               # Dynamic list with swap/add/remove
+│       ├── CoverImage.kt                   # Local path loading + gradient fallback
+│       └── EmptyState.kt                   # Filter-aware placeholder
 │
 ├── di/
 │   └── Modules.kt                          # Koin modules (Room, Repository, ViewModels, Scraper)
@@ -154,7 +154,7 @@ app.lazydex/
 1. **Domain layer has zero Android dependencies**. `MediaItem`, `MediaCategory`, `UserStatus`, `MediaRepository` interface — pure Kotlin. No Context, no Parcelable, no Android types.
 2. **ViewModels never reference Fragment or Activity types**. No `context` in ViewModels. Use `SavedStateHandle` for nav args if needed.
 3. **Repository is the single source of truth**. UI never reads from Room directly. Never caches data outside the repository.
-4. **Scraper returns a domain model, not a parcelable**. `MetadataScraper` returns `ScrapedMetadata(title: String, imageUrl: String)` — pure data.
+4. **Scraper returns a domain model, not a parcelable**. `MetadataScraper` returns `ScrapedMetadata(title: String, imageUrl: String, alternativeTitles: List<String>)` — pure data.
 5. **Screens are stateless Composables**. All state lives in ViewModels. Screens observe `StateFlow` and emit events.
 6. **The Activity does nothing but set ComposeContent**. No logic in `MainActivity`.
 7. **Every write path goes through `MediaItem.normalize()`** before persisting. This is the canonical invariant enforcer (progress capping, bounds, etc.) and CANNOT be bypassed by any caller including import.
@@ -286,14 +286,14 @@ data class MediaItemEntity(
 ### 4.2 Room Database
 
 ```kotlin
-@Database(entities = [MediaItemEntity::class], version = 1, exportSchema = false)
+@Database(entities = [MediaItemEntity::class], version = 1, exportSchema = true)
 @TypeConverters(Converters::class)
 abstract class LazyDexDatabase : RoomDatabase() {
     abstract fun mediaItemDao(): MediaItemDao
 }
 ```
 
-**`exportSchema = false` Decision**: For v1 there are zero migrations. Schema JSON output is unnecessary until a v2 migration is written. When that happens, flip to `true` and configure `room.schemaLocation` in `build.gradle.kts`.
+**`exportSchema = true` Decision**: Schema JSON is tracked from v1 to enable `AutoMigration` for future versions. Configure `room.schemaLocation` in `app/build.gradle.kts` to output the schema file. Without this, v2+ migrations would require manual SQL instead of AutoMigration.
 
 **AI Verification Checklist**:
 - Database name: `"lazydex_db"` (constant)
@@ -314,8 +314,19 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE category = :category ORDER BY dateAdded DESC")
     fun observeByCategory(category: String): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items ORDER BY :sortBy ASC")
-    fun observeAllSorted(sortBy: String): Flow<List<MediaItemEntity>>
+    // NOTE: Sorting is handled in the Repository via separate DAO queries per sort order.
+    // Room cannot bind column names in ORDER BY :param — use fixed queries instead.
+    @Query("SELECT * FROM media_items ORDER BY dateAdded DESC")
+    fun observeAllByDateAdded(): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT * FROM media_items ORDER BY lastUpdated DESC")
+    fun observeAllByLastUpdated(): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT * FROM media_items ORDER BY title ASC")
+    fun observeAllByTitle(): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT * FROM media_items ORDER BY CAST(currentProgress AS REAL) / CAST(COALESCE(totalItems, currentProgress) AS REAL) ASC")
+    fun observeAllByProgress(): Flow<List<MediaItemEntity>>
 
     @Query("SELECT COUNT(*) FROM media_items")
     fun observeCount(): Flow<Int>
@@ -770,7 +781,7 @@ object BackupManager {
 - Backups may omit `lastUpdated`. **Decision**: `lastUpdated` defaults to **epoch 0** (`0L`) when missing, null, or 0. NOT import time. Rationale: if untimestamped imported items got `System.currentTimeMillis()`, they'd be newer than every local item, causing merge ("keep newest") to silently clobber genuinely newer local edits. Epoch 0 means local always wins conflicts against untimestamped imports — safe default. Merge tiebreak (`local wins when timestamps equal`) then also favors local for any imported items that were also stamped 0.
 - `category` may be stored as `NOVEL`, `Novel`, or `novel` — handle case-insensitively
 - `userStatus` similarly may vary — handle case-insensitively
-- `totalItems` and `coverImageUrl` are nullable — ensure kotlinx.serialization handles nullable fields correctly
+- `totalItems`, `rating`, and `notes` are nullable — ensure kotlinx.serialization handles nullable fields correctly
 
 **Deserialization Rules**:
 - `schemaVersion` missing → treat as `1`
@@ -828,6 +839,7 @@ object BackupManager {
 - Each card shows: cover image (async via Coil from local path), title, status badge (color-filled), category badge (outline + icon), rating stars, progress text (current/total), last updated relative time
 - Cards are READ-ONLY — no progress buttons on cards. No long-press context menu
 - Tap card body → navigate to UnifiedAddEditScreen in edit mode with item `id`
+- Filter bottom sheet contains: Category section [All] [Novel] [Manga] [Anime] [Game] [Movie] [TV] and Status section [All] [Reading] [Watching] [Playing] [Completed] [On Hold] [Dropped] [Plan to]
 
 **State Management**:
 ```kotlin
@@ -913,70 +925,97 @@ class HomeViewModel(
 - Relative time display: calculate at render time. Acceptable for "5m ago" to become "6m ago".
 - FAB click: navigate to UnifiedAddEditScreen in add mode.
 
-#### AddItemScreen (Bottom Sheet)
-- Manual entry form as the primary interface
-- URL input field with an "Auto-fill" button (scrapes URL for novels)
-- Category selector chips (Novel, Manga, Anime, Game, Movie, TV)
-- Title text field
-- Cover image URL text field
-- Progress input (number) + Total input (number, optional)
-- Notes field (optional)
-- Cancel and Add buttons
+#### UnifiedAddEditScreen (Full-Screen Form — Add + Edit modes)
 
-**Flow**:
-1. User fills in fields manually, optionally enters URL and taps "Auto-fill"
-2. Show loading state on auto-fill button, disable form fields during scrape
-3. ViewModel calls `scraper.scrape(url)` via ViewModelScope
-4. Success: auto-fill Title and Cover URL fields, re-enable form
-5. Failure: show inline error message below URL input ("Could not auto-fill, please enter manually"), keep form enabled
-6. User can also ignore auto-fill entirely and fill all fields manually
-7. User taps Add → validate form → create MediaItem → save to repository → navigate back
+Single screen handles both adding new items (empty fields, scrape available) and editing existing items (pre-filled from DB, delete button visible in edit mode only).
 
-**Validation Rules** (shared by Add and Edit, except where noted):
+**Fields** (add mode):
+- Cover image display (local path via Coil, gradient+initials fallback)
+- URL input + [Auto-fill] button (add mode only; scrapes title, cover, alternative titles, category)
+- Title text field (blocked during scrape)
+- Alternative titles dynamic list: [↕] swap with main, [×] remove, [+ Add]
+- Category chips (Novel, Manga, Anime, Game, Movie, TV)
+- Status chips (category-adaptive: 1 in-progress + Completed, On Hold, Dropped, Plan to)
+- Rating: 5 tappable stars (half-star precision, 1.0–5.0)
+- Progress (number) + Total (number, optional)
+- Notes text field (optional)
+- Source URL (editable) with [Open URL] button
+- [Save] button (disabled if validation fails)
+- [Delete] button (edit mode only, with confirmation)
+
+**Flow** (add mode):
+1. User enters URL → taps [Auto-fill]
+2. Blocked during scrape: Title, Cover Image, Alternative Titles, Category show spinner
+3. Active during scrape: Progress, Total, Status, Notes, Rating remain editable
+4. Success → scraped values filled into blocked fields. Scraped value replaces user-typed text if different. If scrape finds nothing → user's text preserved.
+5. Auto-detect: if progress = total → auto-set status to Completed
+6. Failure → inline error "Could not auto-fill, please enter manually", blocked fields re-enabled
+
+**Validation Rules** (shared by Add and Edit):
 - Title is required (non-empty, trim whitespace)
 - Category must be selected (default to Novel)
 - URL is optional but if provided must be valid HTTPS
-- Cover URL is optional but if provided must be valid URL (http/https)
-- Progress >= 0 (default 0)
+- Progress >= 0, must be ≤ total if total is set → red error text, Save disabled
 - Total must be >= 0 if provided (null = unknown)
-- **AddItemScreen**: If progress > total and total is not null → show validation error ("Progress cannot exceed total"). Block the save. Rationale: new items have no prior state, so blocking catches the mistake early.
-- **DetailScreen**: Client-side clamp progress on blur (cap to total), show inline hint ("Capped to 100"). Do NOT block save. Rationale: the user may have other changes to save and shouldn't be forced to fix progress first. The repository's `normalize()` is still the authoritative enforcement.
+- Rating 1.0–5.0, optional (null = unrated)
+- Similar title detection: check if main/alt title matches existing item → "Similar title exists" warning
+- **Add mode**: block save if progress > total
+- **Edit mode**: clamp progress on blur (cap to total), show inline hint ("Capped to N"). Do NOT block save. `normalize()` is the authoritative enforcement.
+
+**Status Derivation** (smart default, fully editable):
+- Novel/Manga → **Reading**
+- Anime/Movie/TV → **Watching**
+- Game → **Playing**
 
 **AI Verification Checklist**:
-- Scrape is cancellable via ViewModelScope — if user dismisses bottom sheet during scrape, coroutine is cancelled
-- If scrape is in progress and user manually edits a field, don't overwrite their edit when scrape succeeds
-- Form state survives configuration changes (rotation) — use ViewModel + SavedStateHandle or `rememberSaveable`
-- Tap outside sheet → dismiss without confirmation (v1 simplicity)
-- Duplicate URL check: normalize the new URL via `UrlNormalizer.normalize()`, then call `repository.existsByUrl(normalizedUrl)` — a single SQLite EXISTS query using near-zero memory. Do NOT fetch the full item list into RAM for a string comparison. Show warning: "This URL is already tracked"
-- Empty cover URL → store as empty string. Coil handles empty URLs by showing placeholder.
-- Progress/Total text fields accept only numeric input (`KeyboardType.Number`). **CRITICAL: Safe Int parsing required**. A user leaning on the "9" key or pasting `"999999999999"` will exceed `Int.MAX_VALUE`, and `text.toInt()` will throw `NumberFormatException` and crash. Always parse as `Long` first, clamp to `Int.MAX_VALUE`, then cast down. For `currentProgress` (non-nullable): `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`. For `totalItems` (nullable): `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()` — empty input stays `null`.
-- URL validation on both scrape tap AND submit (user might skip scraping and enter a URL manually)
+- Scrape is cancellable via ViewModelScope — if user dismisses screen during scrape, coroutine is cancelled
+- If scrape is in progress and user manually edits an active field, don't overwrite their edit when scrape succeeds
+- Form state fully hoisted in ViewModel's MutableStateFlow (no `rememberSaveable` split-brain)
+- Cover image displayed from local `coverImagePath` via Coil; gradient+initials fallback if path empty
+- No cover URL text field — cover comes from scrape download or is not set
+- Duplicate URL check: normalize via `UrlNormalizer.normalize()`, then `repository.existsByUrl(normalizedUrl)` — single SQLite EXISTS query. Show warning: "This URL is already tracked"
+- Progress/Total text fields accept only numeric input (`KeyboardType.Number`). **CRITICAL: Safe Int parsing required**. For `currentProgress`: `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`. For `totalItems`: `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()` — empty input stays `null`.
+- URL validation on both scrape tap AND submit (user might skip scraping and enter URL manually)
+- Back press + unsaved changes → discard confirmation dialog: "Discard unsaved changes? [Keep Editing] [Discard]"
 
-#### DetailScreen (Inline Editing)
-- Full screen with toolbar "Details" + back arrow
-- Cover image preview (larger than card)
-- Title text field (editable, auto-saves or has save button)
-- Category chip selector (editable)
-- Progress + Total inputs (editable)
-- Status: dropdown/chips with all 5 statuses (Reading, Completed, On Hold, Dropped, Plan to)
-- Notes field (editable)
-- Source URL (editable — user might have entered a wrong URL initially)
-- "Open URL" button to launch external browser
-- Delete button in toolbar (with confirmation dialog)
-- Save button (floating or in toolbar) — commits all changes
+#### UnifiedAddEditScreen — Edit Mode (previously named DetailScreen)
+
+The same UnifiedAddEditScreen serves edit mode. Pre-fills all fields from DB, adds a [Delete] button in the toolbar.
+
+**Edit-mode differences from add mode**:
+- Toolbar title: "Edit Media" (vs "Add Media")
+- Fields pre-populated from database via `repository.observeById(id).take(1)` → draft `MutableStateFlow`
+- URL input hidden (scrape is add-only)
+- Delete button visible in toolbar (with confirmation dialog)
+- Category change remaps in-progress status (READING↔WATCHING↔PLAYING) but leaves COMPLETED/ON_HOLD/DROPPED/PLAN_TO untouched
+
+**Full edit-mode fields**:
+- Cover image preview (local path via Coil, gradient+initials fallback)
+- Title (editable)
+- Alternative titles: dynamic list with [↕] swap, [×] remove, [+ Add]
+- Category chips (editable — changing category remaps in-progress status)
+- Status chips (category-adaptive: 1 in-progress + Completed, On Hold, Dropped, Plan to)
+- Rating: 5 tappable stars (half-star precision)
+- Progress + Total (editable; clamp on blur with "Capped to N" hint)
+- Notes (editable)
+- Source URL (editable) with [Open URL] button
+- [Save] button
+- [Delete] button (confirmation: "Delete 'Title'? This cannot be undone.")
 
 **AI Verification Checklist**:
-- Editing the source URL is allowed. No stale-data warning needed — if the user changes the URL, the cover/title may become stale, but that's the user's choice.
-- DetailScreen is identified by passing **only the `id` (String)** as the nav argument — NOT the full `MediaItem` object. Navigation Compose serializes arguments into `SavedStateHandle` bundles; passing domain models (with URLs containing special chars) can break route parsing or hit `TransactionTooLargeException`. It also creates a stale disconnected copy of the item, violating the repository-as-SSOF rule.
-- The route argument is `DetailRoute(val id: String)` (a `@Serializable` data class).
-- The `DetailViewModel` observes the `id` from `SavedStateHandle` via `getStateFlow<String>("id", "")` and `flatMapLatest`s into `repository.observeById(id)` — always working with the latest data from Room.
-- On save, calls `repository.update()`.
-- Editing sourceUrl to match another item triggers `SQLiteConstraintException` in the repository. The ViewModel must catch `DuplicateUrlException` and show an inline error: "This URL is already tracked by another item."
+- Editing the source URL is allowed. No stale-data warning needed.
+- Screen identified by passing **only `id` (String)** as nav argument — NOT the full `MediaItem`.
+- The route argument is `AddEditRoute(val id: String?)` (a `@Serializable` data class; null = add mode).
+- ViewModel extracts route via `savedStateHandle.toRoute<AddEditRoute>()` (Nav 2.8 type-safe API).
+- ViewModel initializes draft state from `repository.observeById(id).take(1)` — independent MutableStateFlow not reactive to Room re-emissions (prevents TextField clobbering).
+- On save, calls `repository.update(item.copy(lastUpdated = System.currentTimeMillis()).normalize())`.
+- Editing sourceUrl to match another item → `DuplicateUrlException` caught, inline error: "This URL is already tracked by another item."
 - Must update `lastUpdated` on save (done by repository).
-- Delete shows confirmation dialog: "Delete 'Title'? This cannot be undone."
-- Discard changes on back press without confirmation (v1 simplicity).
-- No optimistic locking for v1. The "two screens editing same item" race is accepted as a rare edge case. The last save wins. (See 4.10.5.)
-- **Clamping feedback is required**: If `normalize()` clamps progress (e.g. user types 500 but total is 100), the user sees the corrected value with no explanation. On save, visually clamp the progress field value client-side on blur (before it reaches the ViewModel) by capping it to the current `total` value. Show a brief inline hint next to the progress field: "Capped to 100". This prevents the silent-correction confusion and gives immediate feedback. The ViewModel must still call `normalize()` — the client-side clamp is a UX courtesy, not a correctness substitute.
+- Delete shows confirmation dialog, then `repository.delete(id)` → emit navigation event to pop back.
+- Discard unsaved changes on back press with confirmation dialog: "Discard unsaved changes? [Keep Editing] [Discard]"
+- No optimistic locking for v1. Last save wins.
+- **Clamping feedback**: If `normalize()` clamps progress, show inline hint "Capped to N" on blur AND when save completes (ViewModel emits snackbar event). Prevents confusion when user taps Save without dismissing keyboard.
+- **Category-Changed Status Remap**: When user changes category (e.g. Anime→Novel), only READING/WATCHING/PLAYING get remapped to the new category's in-progress equivalent. COMPLETED/ON_HOLD/DROPPED/PLAN_TO are category-agnostic and stay untouched.
 
 #### SettingsScreen
 - Toolbar "Settings" with back arrow
@@ -1191,7 +1230,7 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Create `domain/repository/MediaRepository.kt` interface
 - [ ] Create `data/local/entity/MediaItemEntity.kt`
 - [ ] Create `data/local/dao/MediaItemDao.kt` (with atomic increment/decrement, `@Transaction replaceAll`)
-- [ ] Create `data/local/LazyDexDatabase.kt` (exportSchema = false, WAL mode)
+- [ ] Create `data/local/LazyDexDatabase.kt` (exportSchema = true, schemaLocation configured, WAL mode)
 - [ ] Create `data/local/converter/Converters.kt` — TypeConverter for `List<String>` ↔ JSON string (alternative titles)
 - [ ] Create `data/repository/MediaRepositoryImpl.kt` (normalize() on every write, UUID in add only)
 - [ ] Create `util/UrlNormalizer.kt` (single canonical normalizer, used by repository + scraper)
@@ -1239,9 +1278,9 @@ The AI MUST follow this order. Each phase depends on the previous one.
 ### Phase 6: Home Screen
 - [ ] Create `ui/home/HomeViewModel.kt`
 - [ ] Create `ui/home/HomeScreen.kt`
-- [ ] Wire filter chips, list, FAB
-- [ ] Handle all user interactions (atomic increment, decrement, status toggle, tap, long press)
-- [ ] **AI must verify**: All interactions work, loading states are correct, filter works, empty state shows, config change survives, one-shot events use Channel
+- [ ] Wire filter chips, list, FAB, settings gear
+- [ ] Handle user interactions: tap card → navigate to UnifiedAddEditScreen (edit mode), tap FAB → UnifiedAddEditScreen (add mode), tap Filter → FilterBottomSheet, tap Sort → SortBottomSheet, tap gear → SettingsScreen
+- [ ] **AI must verify**: Cards are READ-ONLY (no increment/decrement/status-toggle on cards), all interactions work, loading states are correct, filter-aware empty state, config change survives, one-shot events use Channel
 
 ### Phase 7: Scraper
 - [ ] Create `scraper/MetadataScraper.kt` + tests (MockWebServer for HTTP responses)
@@ -1253,17 +1292,19 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Create `ui/addedit/UnifiedAddEditViewModel.kt`
 - [ ] Create `ui/addedit/UnifiedAddEditScreen.kt`
 - [ ] Single screen handles both add mode (empty + scrape) and edit mode (pre-filled + delete)
-- [ ] Add mode: URL input + Auto-fill button, scrape fills blocked fields
+- [ ] Add mode: URL input + Auto-fill button, scrape fills blocked fields (title, cover, alts, category)
 - [ ] Edit mode: pre-populate from DB via `observeById(id).take(1)` → draft `MutableStateFlow`
+- [ ] Category chips: Novel, Manga, Anime, Game, Movie, TV (editable; category-change remaps in-progress status)
+- [ ] Status chips: category-adaptive (1 in-progress + Completed, On Hold, Dropped, Plan to)
 - [ ] Alternative titles: dynamic list with swap-to-main, add, remove
 - [ ] Rating: 5 tappable stars (half-star precision)
-- [ ] Cover image: display from local path, gradient fallback
+- [ ] Cover image: display from local path, gradient fallback; optional cover URL field for re-download if scrape fails
 - [ ] Form validation: title required, progress ≤ total (red error + disable Save)
-- [ ] Back navigation with unsaved changes → confirmation dialog
-- [ ] Delete with confirmation dialog (edit mode only)
+- [ ] Back navigation with unsaved changes → confirmation dialog: "Discard unsaved changes? [Keep Editing] [Discard]"
+- [ ] Delete with confirmation dialog (edit mode only), emit navigation event after deletion
 - [ ] Save calls `repository.update()` (edit) or `repository.add()` (add)
-- [ ] Source URL button to open in external browser
-- [ ] **AI must verify**: Both modes work, form state preserved on config change, validation correct, no UUID generation in ViewModel, back button shows dialog, scrape blocks only conflicting fields
+- [ ] Source URL field (editable) + [Open URL] button to launch external browser
+- [ ] **AI must verify**: Both modes work, form state preserved on config change (hoisted in ViewModel MutableStateFlow), validation correct, no UUID generation in ViewModel, back button shows dialog, scrape blocks only conflicting fields, category-change remaps in-progress status, DuplicateUrlException caught with inline error
 
 ### Phase 9: Settings Screen
 - [ ] Create `backup/BackupProcessor.kt` + tests (round-trip, merge, schema version default 1, case-insensitive enums)
@@ -1426,7 +1467,7 @@ plugins {
 - `testOptions { unitTests.all { useJUnitPlatform() } }` for unit test module
 - `proguard-rules.pro`: must contain `-keepattributes *Annotation*`, `-keepclassmembers class kotlinx.serialization.json.** { *** Companion; }`, and keep rules for all `@Serializable` classes
 - `buildFeatures.buildConfig = true` for version info in Settings
-- `room.schemaLocation` not needed until v2 migration (exportSchema = false)
+- `room.schemaLocation` configured from v1 for future AutoMigration support (exportSchema = true)
 - LeakCanary: add `debugImplementation(libs.leakcanary)` in dependencies — never ship to release builds
 
 ---
@@ -1555,7 +1596,7 @@ app/
 ├── src/
 │   ├── main/
 │   │   ├── AndroidManifest.xml
-│   │   ├── kotlin/com/rockyxwall/lazydex/
+│   │   ├── kotlin/app/lazydex/
 │   │   │   ├── LazyDexApp.kt
 │   │   │   ├── MainActivity.kt
 │   │   │   ├── data/
@@ -1607,16 +1648,16 @@ app/
 │   │       ├── values/themes.xml
 │   │       ├── drawable/ (app icon, etc.)
 │   │       └── mipmap-*/ (launcher icons)
-│   ├── test/kotlin/com/rockyxwall/lazydex/
+│   ├── test/kotlin/app/lazydex/
 │   │   ├── data/repository/MediaRepositoryImplTest.kt
 │   │   ├── scraper/MetadataScraperTest.kt
 │   │   ├── backup/BackupProcessorTest.kt
 │   │   ├── ui/home/HomeViewModelTest.kt
 │   │   └── ui/addedit/UnifiedAddEditViewModelTest.kt
-│   └── androidTest/kotlin/com/rockyxwall/lazydex/
+│   └── androidTest/kotlin/app/lazydex/
 │       └── ui/ (Compose UI tests)
 │           ├── HomeScreenTest.kt
-│           ├── AddItemScreenTest.kt
+│           ├── UnifiedAddEditScreenTest.kt
 │           └── SettingsScreenTest.kt
 gradle/
 ├── libs.versions.toml
@@ -1631,7 +1672,7 @@ gradlew.bat
 .gitignore
 ```
 
-**Note**: No `schemas/` directory exists in v1 because `exportSchema = false`. When migrations become necessary in the future, the `schemas/` directory will be added.
+**Note**: The `schemas/` directory is tracked from v1 (`exportSchema = true`) to enable AutoMigration for future Room migrations. Add `room.schemaLocation` in `app/build.gradle.kts`.
 
 ---
 

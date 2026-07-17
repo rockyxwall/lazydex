@@ -205,6 +205,11 @@ Single screen handles both adding new items (empty fields, scrape available) and
 │  │ Editable text field         │    │
 │  └─────────────────────────────┘    │
 │                                     │
+│  Cover URL (optional)                │
+│  ┌─────────────────────────────┐    │
+│  │ https://example.com/cover  │    │  ← Only if scrape fails; triggers download
+│  └─────────────────────────────┘    │
+│                                     │
 │  Source URL                        │
 │  ┌─────────────────────────────┐    │
 │  │ https://novel.site.com/...  │    │  ← Editable
@@ -332,7 +337,8 @@ ViewModel
 │                                     │
 │  ┌─ THEME ──────────────────────┐   │
 │  │                              │   │
-│  │  Dark Theme    [🔘]          │   │  ← Toggle
+│  │  Theme Mode                  │   │  ← 3-state selector
+│  │  [System] [Dark] [Light]     │   │    Dark is default
 │  │  Amoled Mode   [🔘]          │   │  ← Toggle (pure black)
 │  │                              │   │
 │  └──────────────────────────────┘   │
