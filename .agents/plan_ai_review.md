@@ -19,30 +19,28 @@
 Local-only Android media tracker for tracking consumption progress across Novels, Manga, Anime, Games, Movies, and TV Shows. No accounts, no cloud, no social. Privacy-first.
 
 ### Core Features
-1. Manual entry — URL scrape (novels) or AniList/MAL search (anime/manga) as auto-fill options inside the add form
-   - v1.0: manual entry + URL scraping for novels
-   - Post-v1.0: AniList/MyAnimeList search (metadata fetch, no login)
-   - Future: full AniList/MAL sync (OAuth, two-way progress/status sync)
+1. Manual entry — URL scrape (novels) as auto-fill option inside the add form
+   - MVP (v1.0): manual entry + URL scraping for novels. (Note: AniList/MyAnimeList search and sync are post-v1.0 future considerations and strictly out of scope for MVP).
 2. Track progress (simple Int current + optional Int total; unit label derived from category)
 3. Toggle status: 5 statuses (Reading/Watching/Playing, Completed, On Hold, Dropped, Plan to) — display label adapts to category
 4. View all items in a filterable list (by category and status)
 5. Tap item → UnifiedAddEditScreen (edit mode: title, cover, progress, status, alt titles, rating, notes, source URL, delete)
 6. Edit and delete items — inline editing on UnifiedAddEditScreen (edit in place + save), delete with confirmation
-7. Backup/restore data to JSON via SAF + auto-backup (scheduled, like Mihon's .mihonbk)
+7. Backup/restore data to `.lazydex` ZIP archive (containing JSON metadata and optional cover images directory) via SAF + auto-backup (scheduled)
 8. Merge or overwrite on import
 9. Dark theme (default) + Light toggle in settings + dynamic color (Monet, Android 12+) + fallback palette (older Android) + Amoled mode option
-10. Settings screen — Data (export, import), Theme (dark/light toggle, amoled mode), Backup (auto-backup schedule), About (version, credits, licenses)
+10. Settings screen — Data (export metadata or metadata + covers, import), Theme (dark/light toggle, amoled mode), Backup (auto-backup schedule), About (version, credits, licenses)
 
 ### Non-Goals
-- No user accounts (v1.0)
-- No cloud sync (v1.0)
+- No user accounts (v1.0 / MVP)
+- No cloud sync (v1.0 / MVP)
 - No social features
-- No login/authentication (v1.0)
+- No login/authentication (v1.0 / MVP)
 - No multi-device support
 - No extension/plugin system
 - No push notifications
 - No widget
-- Note: AniList/MyAnimeList sync (OAuth) is planned as a post-v1.0 feature, not in-scope for initial release.
+- Note: AniList/MyAnimeList search and sync (OAuth) are planned as post-v1.0 features, not in-scope for the initial MVP release.
 
 ---
 
@@ -207,6 +205,7 @@ data class MediaItem(
     val alternativeTitles: List<String> = emptyList(),  // Flexible list stored as JSON
     val sourceUrl: String?,      // Nullable — SQLite UNIQUE index treats NULLs as non-duplicates
     val coverImagePath: String,  // Local file path (not URL), empty if no cover
+    val coverImageUrl: String?,  // Nullable original URL of the cover (used as fallback for download/restore)
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
     val userStatus: UserStatus,
@@ -217,7 +216,10 @@ data class MediaItem(
 ) {
     /**
      * Canonical normalization — run before EVERY write (add, update, import, merge).
-     * - Trims whitespace from title, sourceUrl, coverImagePath
+     * - Trims whitespace from title, sourceUrl, coverImagePath, coverImageUrl
+     * - Ensures title is never blank (defaults to "Untitled")
+     * - Normalizes sourceUrl via UrlNormalizer
+     * - Validates coverImageUrl has HTTP/HTTPS scheme, otherwise null
      * - Clamps currentProgress to [0, totalItems] when totalItems is non-null
      * - Clamps currentProgress >= 0 when totalItems is null
      * - Caps rating to 1.0–5.0 range
@@ -225,6 +227,9 @@ data class MediaItem(
      */
     fun normalize(): MediaItem {
         val normalizedUrl = sourceUrl?.takeIf { it.isNotBlank() }?.let { UrlNormalizer.normalize(it) }
+        val safeCoverUrl = coverImageUrl?.trim()?.takeIf {
+            it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
+        }
         val safeTotal = totalItems?.takeIf { it >= 0 }
         val safeProgress = when {
             currentProgress < 0 -> 0
@@ -233,10 +238,11 @@ data class MediaItem(
         }
         val safeRating = rating?.coerceIn(1.0, 5.0)
         return copy(
-            title = title.trim(),
+            title = title.trim().ifBlank { "Untitled" },
             alternativeTitles = alternativeTitles.map { it.trim() }.filter { it.isNotBlank() },
             sourceUrl = normalizedUrl,
             coverImagePath = coverImagePath.trim(),
+            coverImageUrl = safeCoverUrl,
             totalItems = safeTotal,
             currentProgress = safeProgress,
             rating = safeRating,
@@ -257,6 +263,7 @@ data class MediaItemEntity(
     val alternativeTitles: String,   // JSON array: ["Alt 1", "Alt 2", ...]
     val sourceUrl: String?,          // Nullable — multiple NULLs allowed under UNIQUE index
     val coverImagePath: String,      // Local file path (not URL), empty if no cover
+    val coverImageUrl: String?,      // Nullable original URL of the cover
     val currentProgress: Int,
     val totalItems: Int?,
     val userStatus: String,          // Stored as uppercase string (e.g. "READING")
@@ -269,16 +276,17 @@ data class MediaItemEntity(
 
 **AI Verification Checklist**:
 - `currentProgress` invariant enforced in `normalize()` — never below 0, never above totalItems when total is non-null
-- `normalize()` must be called by repository on every write (add, update, increment, decrement, setStatus, replaceAll). The repository is responsible, not the ViewModel
+- `normalize()` must be called by repository on every write (add, update, setStatus, replaceAll). The repository is responsible, not the ViewModel
 - **ID generation rule** (two distinct paths):
   - `repository.add()` (UI-entered items) generates a fresh UUID via `UUID.randomUUID()`. This is the **only** place new UUIDs are created. ViewModels never call `UUID.randomUUID()`.
   - **Import/merge** preserves the ID from the JSON file. A new UUID is generated ONLY if the imported item's `id` is missing, null, or empty (see 4.6 deserialization rules). This is critical: if import blindly generated new UUIDs, merge-by-ID would always treat imported items as new, creating duplicates.
 - `totalItems` being null means "unknown" — progress can go arbitrarily high (within Int range)
-- `lastUpdated` must be set on every mutation (add, edit, increment, decrement, status change)
+- `lastUpdated` must be set on every mutation (add, edit, status change)
 - `dateAdded` is set ONCE on creation (in `repository.add()`) and NEVER changed — provides stable sort order
 - `rating` is nullable Double (1.0–5.0). `normalize()` caps with `coerceIn(1.0, 5.0)`
 - `alternativeTitles` stored as JSON array string. TypeConverter converts to/from `List<String>`
 - `coverImagePath` stores local file path (not URL). Empty string = no cover. Cover images downloaded to `{appInternalDir}/covers/{itemId}.{ext}`
+- `coverImageUrl` stores original URL of the cover image. Normalized and validated to have http/https schemes.
 - Entity ↔ Domain mapping uses `MediaCategory.fromString()` and `UserStatus.fromString()` — case-insensitive, defaults to null for unknown values → fail closed (reject the item or skip). The repository must wrap the mapping in try/catch inside `mapNotNull` to prevent a single corrupted row (e.g., from a future backup restore introducing "PODCAST") from crashing the entire Flow stream with a NullPointerException
 - Room TypeConverters or column types? **Decision**: store enum strings directly as columns, use `@TypeConverters` only if you need reusable conversion. Since the DAO already works with raw strings, skip TypeConverters. The repository handles entity↔domain mapping. Alternative titles need a TypeConverter for `List<String>` ↔ JSON string.
 - **`sourceUrl` has a SQLite UNIQUE index** (`@Entity(indices = [Index(value = ["sourceUrl"], unique = true)])`). **sourceUrl must be nullable (`String?`)** — SQLite treats empty strings `""` as equal under a UNIQUE index, so a second item with no URL would throw `SQLiteConstraintException`. Null values are never considered duplicates. This is a database-level safeguard — duplicate URL detection is NOT solely the UI's responsibility. The repository must catch `SQLiteConstraintException` and map it to a domain exception. See Section 4.4 for error handling.
@@ -314,8 +322,23 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items WHERE category = :category ORDER BY dateAdded DESC")
     fun observeByCategory(category: String): Flow<List<MediaItemEntity>>
 
-    // NOTE: Sorting is handled in the Repository via separate DAO queries per sort order.
-    // Room cannot bind column names in ORDER BY :param — use fixed queries instead.
+    /**
+     * Filtered observation that supports category and a general UI StatusFilter mapping.
+     * Uses a single query with IN clause to handle in-progress mappings.
+     */
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE (:category IS NULL OR category = :category)
+        AND (
+            :filterType = 'ALL' OR 
+            (:filterType = 'IN_PROGRESS' AND userStatus IN ('READING', 'WATCHING', 'PLAYING')) OR
+            (:filterType = 'EXACT' AND userStatus = :exactStatus)
+        )
+        ORDER BY dateAdded DESC
+    """)
+    fun observeFiltered(category: String?, filterType: String, exactStatus: String?): Flow<List<MediaItemEntity>>
+
+    // Sorting queries
     @Query("SELECT * FROM media_items ORDER BY dateAdded DESC")
     fun observeAllByDateAdded(): Flow<List<MediaItemEntity>>
 
@@ -345,13 +368,6 @@ interface MediaItemDao {
     @Query("SELECT EXISTS(SELECT 1 FROM media_items WHERE sourceUrl = :url LIMIT 1)")
     suspend fun existsByUrl(url: String): Boolean
 
-    // Writes — using @Upsert (Room 2.5+) instead of @Insert(onConflict = REPLACE)
-    // NOTE: @Upsert preserves the SQLite rowid vs INSERT(REPLACE) which deletes+reinserts.
-    // HOWEVER: Room's invalidation tracker fires at the TABLE level, not the row level.
-    // ANY write to media_items (UPDATE, INSERT, DELETE) triggers re-evaluation of ALL
-    // active Flow queries on that table regardless of rowid changes. @Upsert alone does
-    // NOT prevent false-positive Flow re-emissions. The Repository layer MUST apply
-    // .distinctUntilChanged() after mapping to domain to suppress table-level noise.
     @Upsert
     suspend fun upsert(item: MediaItemEntity)
 
@@ -360,7 +376,6 @@ interface MediaItemDao {
 
     /**
      * Atomic progress increment — uses single SQL UPDATE with MIN() capping.
-     * No read-modify-write race condition. No debounce needed.
      */
     @Query("""
         UPDATE media_items
@@ -372,8 +387,6 @@ interface MediaItemDao {
 
     /**
      * Atomic progress decrement — uses single SQL UPDATE with MAX() floor.
-     * Mirrors increment but in reverse: floor at 0, never below.
-     * Cannot be a copy-paste of increment (MIN vs MAX, +1 vs -1, no COALESCE needed).
      */
     @Query("""
         UPDATE media_items
@@ -406,8 +419,10 @@ interface MediaItemDao {
      * Prevents data loss if process dies between deleteAll and upsertAll.
      */
     @Transaction
-    @Query("DELETE FROM media_items")
-    suspend fun clearAndInsert(items: List<MediaItemEntity>)
+    suspend fun replaceAll(items: List<MediaItemEntity>) {
+        deleteAll()
+        upsertAll(items)
+    }
 }
 ```
 
@@ -440,7 +455,8 @@ interface MediaRepository {
     /** Reactive observation — UI bindings */
     fun observeAll(): Flow<List<MediaItem>>
     fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>>
-    fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for DetailViewModel
+    fun observeFiltered(category: MediaCategory?, statusFilter: StatusFilter): Flow<List<MediaItem>>
+    fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for UnifiedAddEditViewModel
 
     /** One-shot reads */
     suspend fun getById(id: String): MediaItem?
@@ -474,41 +490,25 @@ interface MediaRepository {
 
 ```kotlin
 // util/UrlNormalizer.kt
-import java.net.URI
+import okhttp3.HttpUrl
 
 object UrlNormalizer {
     /**
      * Canonical URL normalization for duplicate detection + scrape validation.
-     * Uses java.net.URI (pure Java/Kotlin, no Android dependency) to safely
-     * parse and normalize without destroying query parameters or path segments
-     * via naive string manipulation.
+     * Uses OkHttp's HttpUrl to parse and normalize, which handles encoding spaces
+     * and general web-scale URL quirks natively without throwing URISyntaxException.
      * - Lowercase scheme + host
      * - Trim whitespace
      * - Remove trailing slash
-     * - Strip fragment (#...) via URI builder
-     * Does NOT validate the URL (use UrlValidator for that).
+     * - Strip fragment (#...)
      */
     fun normalize(url: String): String {
-        return try {
-            val uri = URI(url.trim())
-            val scheme = uri.scheme?.lowercase()
-            val host = uri.host?.lowercase()
-
-            // Reconstruct without fragment
-            val normalized = URI(
-                scheme,
-                uri.userInfo,
-                host,
-                uri.port,
-                uri.path,
-                uri.query,
-                null // Strip fragment
-            ).toString()
-
-            normalized.removeSuffix("/")
-        } catch (e: Exception) {
-            url.trim()
-        }
+        val httpUrl = HttpUrl.parse(url.trim()) ?: return url.trim()
+        return httpUrl.newBuilder()
+            .fragment(null)
+            .build()
+            .toString()
+            .removeSuffix("/")
     }
 }
 ```
@@ -519,7 +519,7 @@ The scraper in 4.5 calls `UrlNormalizer.normalize(url)` for its normalization st
 - `add()` generates UUID and sets lastUpdated — this is the **only** place UUIDs are generated. ViewModels never call `UUID.randomUUID()`
 - `normalize()` is called in the repository on every write path — NOT in the ViewModel, NOT in the UI
 - `replaceAll()` normalizes every item individually — this handles the import-bypass gap. Even if a corrupted backup has `currentProgress = -5`, it gets clamped to 0 before hitting the DB
-- Atomic increment/decrement means NO debounce in the ViewModel. "Rapid tap" is safe. Remove the debounce suggestion from 4.10.1
+- Atomic increment/decrement means NO debounce in the ViewModel. "Rapid tap" is safe.
 - Optimistic locking (stale-edit detection) is NOT implemented for v1. See 4.10.5 for rationale
 - Error handling: repository wraps DB exceptions and rethrows as `DataAccessException` (a custom sealed class or RuntimeException subclass). Alternatively, use Kotlin `Result<T>` for all write operations
 - **UNIQUE constraint on `sourceUrl`**: The entity has a SQLite UNIQUE index on `sourceUrl`. If the repository's `add()`, `update()`, or `replaceAll()` triggers a `SQLiteConstraintException` (e.g., an edge case bypasses the UI-level duplicate check), the repository must catch it and map it to a `DuplicateUrlException` domain exception. Do NOT let raw constraint violations propagate to the ViewModel.
@@ -541,13 +541,72 @@ The scraper in 4.5 calls `UrlNormalizer.normalize(url)` for its normalization st
 
 ```kotlin
 class MetadataScraper(private val okHttpClient: OkHttpClient) {
-    suspend fun scrape(url: String): Result<ScrapedMetadata>
+    suspend fun scrape(url: String): Result<ScrapedMetadata> = withTimeout(30_000L) {
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder().url(url).build()
+                val call = okHttpClient.newCall(request)
+                
+                currentCoroutineContext()[Job]?.invokeOnCompletion {
+                    call.cancel()
+                }
+
+                call.execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("Unexpected code $response")
+                    val body = response.body ?: throw IOException("Empty body")
+                    
+                    // Check Content-Type subtype: assume html if missing, permit xhtml+xml and html
+                    val subtype = body.contentType()?.subtype ?: "html"
+                    if (!subtype.contains("html", ignoreCase = true) && !subtype.contains("xml", ignoreCase = true)) {
+                        throw IOException("URL does not point to an HTML page (got $subtype)")
+                    }
+
+                    // Check Content-Length header first — fast rejection for known-large
+                    val contentLength = body.contentLength()
+                    if (contentLength > MAX_SCRAPE_BYTES) throw IOException("File too large")
+                    
+                    // Use custom SizeLimitedSource to read safely without buffering the entire body
+                    val limitedSource = SizeLimitedSource(body.source(), MAX_SCRAPE_BYTES).buffer()
+                    val doc = withContext(Dispatchers.Default) {
+                        // Pass null for charset to allow Jsoup to sniff the true encoding from headers/<meta> tags (prevents mojibake)
+                        Jsoup.parse(limitedSource.inputStream(), null, url)
+                    }
+                    
+                    val title = extractTitle(doc)
+                    val imageUrl = extractImageUrl(doc)
+                    val alternativeTitles = extractAlternativeTitles(doc)
+                    Result.success(ScrapedMetadata(title, imageUrl, alternativeTitles))
+                }
+            } catch (e: TimeoutCancellationException) {
+                Result.failure(Exception("Request timed out. The site may be slow or unreachable.", e))
+            } catch (e: Exception) {
+                if (e is IOException && e.message == "Canceled" || !currentCoroutineContext().isActive) {
+                    throw CancellationException("Scrape cancelled", e)
+                }
+                Result.failure(e)
+            }
+        }
+    }
 
     data class ScrapedMetadata(
         val title: String,
         val imageUrl: String,
         val alternativeTitles: List<String> = emptyList()
     )
+}
+
+private const val MAX_SCRAPE_BYTES = 5L * 1024 * 1024
+
+class SizeLimitedSource(delegate: Source, private val maxBytes: Long) : ForwardingSource(delegate) {
+    private var totalRead = 0L
+    override fun read(sink: Buffer, byteCount: Long): Long {
+        val result = super.read(sink, byteCount)
+        if (result != -1L) {
+            totalRead += result
+            if (totalRead > maxBytes) throw IOException("Response exceeded $maxBytes bytes")
+        }
+        return result
+    }
 }
 ```
 
@@ -564,7 +623,7 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 
 **URL Validation Rules**:
 - Must start with `https://` (reject `http://` and non-http schemes)
-- Must be a valid URL (use `java.net.URL` or regex — prefer regex to avoid URL constructor side effects)
+- Must be a valid URL (use OkHttp's `HttpUrl.parse()` to check, encoding spaces gracefully)
 - Max length: 2048 characters (standard URL max)
 - Reject IP-address-based URLs (security: no `https://192.168.x.x` or `https://10.x.x.x`)
 - Reject known malicious patterns (e.g., URLs containing JavaScript schemes, `data:` URIs, `file://`)
@@ -592,8 +651,8 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 - URL is malformed (no dots, spaces, invalid characters)
 - URL is `http://` not `https://` — reject with "Only HTTPS URLs are supported"
 - URL is a localhost/intranet IP — reject with "Only public URLs are supported"
-- URL points to a binary file (PDF, ZIP, image) — the page returns non-HTML
-- Network timeout (15s read timeout, but site takes 30s)
+- URL points to a binary file (PDF, ZIP, image) — the page returns non-HTML (caught by Content-Type subtype validation)
+- Network timeout (15s read timeout, but site takes 30s) — caught by coroutine `withTimeout(30_000L)` and throws `TimeoutCancellationException` which is mapped to a timeout error Result
 - DNS resolution failure
 - SSL handshake failure (expired cert, wrong host)
 - Server returns 4xx or 5xx
@@ -603,76 +662,34 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 - Page requires cookies/accept headers (some sites return 403 without proper headers)
 - Page uses Cloudflare/DDOS protection (returns challenge page)
 - Page redirects multiple times (OkHttp follows redirects by default, but set max redirects to 5)
-- Page is extremely large (>5MB) — abort and fail. CRITICAL: Content-Length header may be absent or lie (chunked transfer encoding). Always enforce a hard byte limit at the Okio source level via `body.source().peek().readByteString(5 * 1024 * 1024)` BEFORE calling Jsoup.parse(). Never call `response.body.string()` on an unbounded response — that loads the entire payload into memory and causes OOM. Jsoup.parse() is CPU-bound and MUST run on Dispatchers.Default, NOT on OkHttp's IO dispatcher pool.
+- Page is extremely large (>5MB) — abort and fail at the Okio source level via `SizeLimitedSource` throwing `IOException` to prevent memory exhaustion / OOM
 - `og:title` exists but is empty string
 - `og:image` exists but is a relative URL — resolve to absolute using `Jsoup`'s `absUrl("content")`
 - `og:image` scheme is `http://` — keep as-is. Coil handles http images. Do NOT try to upgrade to https.
 - Title extracted is garbage (e.g., "404 Not Found", "Access Denied", "Error") — heuristic rejection check
 - Multiple languages in title (e.g., English primary with Japanese subtitle) — keep as-is
-- Character encoding issues (ISO-8859-1 vs UTF-8 pages) — Jsoup handles this
+- Character encoding issues (ISO-8859-1 vs UTF-8 pages) — Jsoup handles this automatically when charset is null
 - JavaScript-rendered pages (Jsoup can't execute JS — this is intentional. If site requires JS, scraping fails gracefully. NO WebView fallback.)
 - Rate limiting / 429 Too Many Requests — the scraper returns the failure message. No automatic retry.
 
 **AI MUST verify**:
-- OkHttp client is configured with proper timeouts (connect: 10s, read: 15s, write: 10s)
-- `followRedirects = true`, `followSslRedirects = true`, max redirects = 5
-- User-Agent is set to a modern mobile browser string (e.g., Chrome Android latest)
-- No cookies are persisted between requests (`NoCookieJar` or null CookieJar)
-- The request is a GET with standard headers only (no custom auth headers)
-- Scraper is injectable (takes OkHttpClient as constructor parameter) — testable
-- `scrape()` is a `suspend` function — use `withContext(Dispatchers.IO)` with `call.execute()` and a cancellation listener, then run `Jsoup.parse()` on `Dispatchers.Default`. The `suspendCancellableCoroutine` + `enqueue` pattern is incorrect because it runs `Jsoup.parse()` (CPU-bound) on OkHttp's IO callback thread. The correct pattern:
-  ```kotlin
-  suspend fun scrape(url: String): Result<ScrapedMetadata> = withContext(Dispatchers.IO) {
-      try {
-          val request = Request.Builder().url(url).build()
-          val call = okHttpClient.newCall(request)
-          
-          currentCoroutineContext()[Job]?.invokeOnCompletion {
-              call.cancel()
-          }
-
-          call.execute().use { response ->
-              if (!response.isSuccessful) throw IOException("Unexpected code $response")
-              val body = response.body ?: throw IOException("Empty body")
-              
-              // Check Content-Length header first — fast rejection for known-large
-              val contentLength = body.contentLength()
-              if (contentLength > 5 * 1024 * 1024) throw IOException("File too large")
-              // BoundedInputStream: streams directly to Jsoup without buffering
-              // the entire HTML as a contiguous 5MB byte array + String.
-              val limitStream = BoundedInputStream(body.byteStream(), MAX_SCRAPE_BYTES)
-              val doc = withContext(Dispatchers.Default) {
-                  Jsoup.parse(limitStream, "UTF-8", url)
-              }
-              
-              val title = extractTitle(doc)
-              val imageUrl = extractImageUrl(doc)
-              Result.success(ScrapedMetadata(title, imageUrl))
-          }
-      } catch (e: Exception) {
-          Result.failure(e)
-      }
-  }
-  ```
-- `Result.failure` includes a meaningful error message, not just the exception
-- No memory leaks: OkHttp response body must be closed (`Response.use {}` or ensure body is consumed), Jsoup Document must not leak
-
-### 4.6 Backup System
+- OkHttp client is configured with prop### 4.6 Backup System
 
 ```kotlin
 @Serializable
-private data class BackupEnvelopeDto(
+data class BackupEnvelopeDto(
     val schemaVersion: Int = 1,
     val items: List<MediaItemBackupDto>? = null
 )
 
 @Serializable
-private data class MediaItemBackupDto(
+data class MediaItemBackupDto(
     val id: String? = null,
     val category: String? = null,
     val title: String? = null,
     val alternativeTitles: List<String>? = null,
     val sourceUrl: String? = null,
+    val coverImageUrl: String? = null,
     val currentProgress: Int? = null,
     val totalItems: Int? = null,
     val userStatus: String? = null,
@@ -688,12 +705,6 @@ object BackupProcessor {
         decodeEnumsCaseInsensitive = true
     }
 
-    @Serializable
-    private data class BackupEnvelopeDto(
-        val schemaVersion: Int = 1,
-        val items: List<MediaItemBackupDto>? = null
-    )
-
     suspend fun serialize(items: List<MediaItem>): String = withContext(Dispatchers.Default) {
         val envelope = BackupEnvelopeDto(items = items.map { it.toDto() })
         backupJson.encodeToString(envelope)
@@ -704,7 +715,32 @@ object BackupProcessor {
         envelope.items?.mapNotNull { dto -> dto.toDomain() } ?: emptyList()
     }
 
-    suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem>
+    suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem> =
+        withContext(Dispatchers.Default) {
+            val localById = local.associateBy { it.id }
+            val localByUrl = local.filter { it.sourceUrl != null }.associateBy { it.sourceUrl }
+            val result = LinkedHashMap<String, MediaItem>()
+            local.forEach { result[it.id] = it }
+            
+            imported.forEachIndexed { index, item ->
+                // Check duplicate by URL first, then by ID
+                val existingLocal = localById[item.id] ?: item.sourceUrl?.let { localByUrl[it] }
+                
+                when {
+                    existingLocal == null -> {
+                        // Pure addition: preserve timestamp if > 0, otherwise stagger
+                        val finalTime = if (item.lastUpdated > 0L) item.lastUpdated
+                                        else System.currentTimeMillis() - index
+                        result[item.id] = item.copy(lastUpdated = finalTime).normalize()
+                    }
+                    item.lastUpdated > existingLocal.lastUpdated -> {
+                        // Imported item is newer: overwrite local (keep local ID if matched by URL)
+                        result[existingLocal.id] = item.copy(id = existingLocal.id).normalize()
+                    }
+                }
+            }
+            result.values.toList()
+        }
 
     private fun MediaItem.toDto() = MediaItemBackupDto(
         id = id,
@@ -712,6 +748,7 @@ object BackupProcessor {
         title = title,
         alternativeTitles = alternativeTitles.ifEmpty { null },
         sourceUrl = sourceUrl,
+        coverImageUrl = coverImageUrl,
         currentProgress = currentProgress,
         totalItems = totalItems,
         userStatus = userStatus.name,
@@ -729,14 +766,15 @@ private fun MediaItemBackupDto.toDomain(): MediaItem? {
     val safeProgress = maxOf(currentProgress ?: 0, 0)
     val safeTotal = totalItems?.takeIf { it >= 0 }
     val safeLastUpdated = if (lastUpdated != null && lastUpdated > 0L) lastUpdated else 0L
-    val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else 0L
+    val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else System.currentTimeMillis()
     return MediaItem(
         id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
         category = safeCategory,
         title = safeTitle,
         alternativeTitles = alternativeTitles ?: emptyList(),
         sourceUrl = sourceUrl?.trim(),
-        coverImagePath = "",  // Covers are local files — cannot import from backup
+        coverImagePath = "",  // Will be populated during cover extraction if zip matches
+        coverImageUrl = coverImageUrl?.trim(),
         currentProgress = safeProgress,
         totalItems = safeTotal,
         userStatus = safeStatus,
@@ -748,12 +786,105 @@ private fun MediaItemBackupDto.toDomain(): MediaItem? {
 }
 
 object BackupManager {
-    suspend fun export(context: Context, uri: Uri, items: List<MediaItem>)
-    suspend fun import(context: Context, uri: Uri): List<MediaItem>
+    /**
+     * Exports backup data to a .lazydex ZIP file at the target SAF URI.
+     * Packages the backup.json metadata and optionally the local covers/ folder.
+     */
+    suspend fun export(
+        context: Context,
+        uri: Uri,
+        items: List<MediaItem>,
+        includeCovers: Boolean,
+        localCoversDir: File
+    ) = withContext(Dispatchers.IO) {
+        val tempFile = File(context.cacheDir, "backup_${UUID.randomUUID()}.tmp")
+        try {
+            ZipOutputStream(tempFile.outputStream().buffered()).use { zipOut ->
+                // Write backup.json
+                zipOut.putNextEntry(ZipEntry("backup.json"))
+                val jsonMetadata = BackupProcessor.serialize(items)
+                zipOut.write(jsonMetadata.toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+
+                // Write covers if selected
+                if (includeCovers && localCoversDir.exists() && localCoversDir.isDirectory) {
+                    val coverFiles = localCoversDir.listFiles() ?: emptyArray()
+                    for (file in coverFiles) {
+                        if (file.isFile) {
+                            zipOut.putNextEntry(ZipEntry("covers/${file.name}"))
+                            file.inputStream().use { it.copyTo(zipOut) }
+                            zipOut.closeEntry()
+                        }
+                    }
+                }
+            }
+
+            // Copy the finalized ZIP to the SAF target
+            context.contentResolver.openOutputStream(uri, "wt")?.use { safOut ->
+                tempFile.inputStream().use { it.copyTo(safOut) }
+            } ?: throw IOException("Could not open output stream for $uri")
+        } finally {
+            if (tempFile.exists()) tempFile.delete()
+        }
+    }
+
+    /**
+     * Imports a .lazydex ZIP file, extracting backup.json and any covers to a temporary directory.
+     * Returns the list of parsed MediaItems, and calls the block with the temporary covers directory.
+     */
+    suspend fun import(
+        context: Context,
+        uri: Uri,
+        onImportSuccess: suspend (items: List<MediaItem>, tempCoversDir: File?) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val tempZipFile = File(context.cacheDir, "import_${UUID.randomUUID()}.tmp")
+        val tempExtractDir = File(context.cacheDir, "extracted_${UUID.randomUUID()}")
+        tempExtractDir.mkdirs()
+
+        try {
+            // Copy from SAF to local temp file
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempZipFile.outputStream().use { output -> input.copyTo(output) }
+            } ?: throw IOException("Could not open input stream for $uri")
+
+            // Unzip file
+            var jsonString: String? = null
+            val tempCoversDir = File(tempExtractDir, "covers")
+            
+            ZipInputStream(tempZipFile.inputStream().buffered()).use { zipIn ->
+                var entry = zipIn.nextEntry
+                while (entry != null) {
+                    when {
+                        entry.name == "backup.json" -> {
+                            jsonString = zipIn.bufferedReader(Charsets.UTF_8).readText()
+                        }
+                        entry.name.startsWith("covers/") && !entry.isDirectory -> {
+                            tempCoversDir.mkdirs()
+                            val filename = entry.name.substringAfter("covers/")
+                            val targetFile = File(tempCoversDir, filename)
+                            targetFile.outputStream().use { zipIn.copyTo(it) }
+                        }
+                    }
+                    zipIn.closeEntry()
+                    entry = zipIn.nextEntry
+                }
+            }
+
+            val json = jsonString ?: throw IllegalArgumentException("Missing backup.json inside ZIP")
+            val items = BackupProcessor.deserialize(json)
+            
+            // Execute the import success block while the temp covers are available
+            onImportSuccess(items, tempCoversDir.takeIf { it.exists() })
+
+        } finally {
+            if (tempZipFile.exists()) tempZipFile.delete()
+            tempExtractDir.deleteRecursively()
+        }
+    }
 }
 ```
 
-**Backup JSON Schema**:
+**Backup JSON Schema** (contained inside `backup.json` inside the `.lazydex` ZIP):
 ```json
 {
     "schemaVersion": 1,
@@ -764,6 +895,7 @@ object BackupManager {
             "title": "Example",
             "alternativeTitles": ["Alt 1", "Alt 2"],
             "sourceUrl": "https://...",
+            "coverImageUrl": "https://...",
             "currentProgress": 42,
             "totalItems": 100,
             "userStatus": "READING",
@@ -791,39 +923,26 @@ object BackupManager {
 - Individual item with missing `id` → generate a new UUID (don't reject the whole import)
 - Individual item with missing `title` → reject that item (data is corrupted)
 - `category` string doesn't match any `MediaCategory` value → reject that item
-- `userStatus` string doesn't match any `UserStatus` value → default to `READING`
+- `userStatus` string doesn't match any `UserStatus` value → default to category-adaptive status
 - `currentProgress` negative or null → clamp to 0 during deserialization
 - `totalItems` negative → treat as `null`
-- `lastUpdated` is 0, negative, or missing → set to epoch 0 (0L). NOT `System.currentTimeMillis()`. Rationale: stamping imported items with import time makes them newer than every local item, so merge ("keep newer") silently clobbers genuine local edits. Epoch 0 is the safe default — local always wins conflicts against untimestamped imports. Note: `merge()` will correct pure-addition items (no local counterpart) to `System.currentTimeMillis()` — see merge logic below. Deserialization itself stays conservative (epoch 0) because it has no knowledge of which items have local counterparts.
+- `lastUpdated` is 0, negative, or missing → set to epoch 0 (0L). NOT `System.currentTimeMillis()`. Rationale: stamping imported items with import time makes them newer than every local item, so merge ("keep newest") silently clobbers genuine local edits. Epoch 0 is the safe default — local always wins conflicts against untimestamped imports. Note: `merge()` will correct pure-addition items (no local counterpart) to `System.currentTimeMillis()` — see merge logic below. Deserialization itself stays conservative (epoch 0) because it has no knowledge of which items have local counterparts.
 - Empty file or blank string → throw `IllegalArgumentException("Backup file is empty")`
-- File > 10MB → abort with "Backup file is too large"
+- File > 50MB → abort with "Backup file is too large"
 
 **Export Rules**:
-- Write to temp file first: `File(context.cacheDir, "temp_backup.json")`. Prevents partial-file corruption if write fails mid-way.
-- Transfer to SAF target URI via content resolver: open an output stream to the SAF URI via `context.contentResolver.openOutputStream(uri, "wt")` (nullable — must check) and copy using `tempFile.inputStream().use { input -> outputStream.use { output -> input.copyTo(output) } }`. SAF URIs use `content://` scheme — `java.io.File.renameTo()` cannot target a content URI and will throw a `SecurityException`. Use `"wt"` (write + truncate) rather than `"w"` because on some OEM Android variants, `"w"` overwrites the beginning of the file but does not truncate remaining bytes, leaving trailing garbage if the new backup is smaller than the previous one at the same URI.
-- Delete the temporary file after successful transfer.
-- Use `BufferedWriter` with UTF-8 encoding, no BOM
-- All items are normalized before serialization (redundant but safe — they should already be normalized)
-- **Auto-backup**: Optional scheduled backup via WorkManager (daily/weekly). Exports to app-internal storage with timestamped filenames. User configures schedule in Settings.
+- Temp file write must be wrapped in `try/finally` block to guarantee deletion on failure or coroutine cancellation (prevents storage leaks).
+- Package backup as `.lazydex` ZIP archive. Include optional cover images from local directory into `covers/` subdirectory.
+- Copy temp file to SAF target URI via ContentResolver's `openOutputStream(uri, "wt")`.
 
 **Merge Logic**:
-- Keyed by `id` (UUID string)
-- For conflicts, keep the item with the newer `lastUpdated` timestamp
-- If timestamps are equal, keep local (deterministic: local wins)
-- Items only in local → keep as-is
-- Items only in imported → preserve valid timestamps from JSON; fall back to staggered timestamps only for items that lack a valid timestamp. Rationale: if the user exported their items (which have real historical timestamps), then uninstalled/reinstalled and imported the same file, every item is a "pure addition". Blindly overwriting with `System.currentTimeMillis() - index` would destroy the user's entire chronological history. The merge must check `importedItem.lastUpdated > 0L` first. For items with a valid timestamp, keep it. For items without (e.g., from a backup that had no `lastUpdated` field), stamp with staggered import time: `val finalTime = if (importedItem.lastUpdated > 0L) importedItem.lastUpdated else System.currentTimeMillis() - index`.
-- Use `LinkedHashMap` to preserve insertion order deterministically
-- Normalize all items in the merged result before returning
-- Note on result ordering: the array order from merge is consumed only by JSON export. The UI (`observeAll()` — see 4.3) always re-sorts by `ORDER BY lastUpdated DESC`, so merge's insertion order is invisible on screen. This is correct — users expect newly imported items to appear at the top of their list, not appended at the bottom.
+- Deduplicates by BOTH `id` and normalized `sourceUrl`. Group by normalized URL first, resolve conflicts, and force the winning model to adopt the local database's `id`.
+- Tie-break: Newer timestamp wins; local wins on tie.
+- Cover image restore/overwrite is tied to the conflict resolution decision: If imported item wins or is a new addition, copy/restore its cover image from the ZIP to local storage. Otherwise, keep the local cover image.
+
+**Auto-backup**: WorkManager scheduled daily/weekly. Writes to a temporary file in app-internal storage first, packages the ZIP (including covers if enabled), and only copies the completed ZIP to the SAF directory once it is fully validated (prevents partial-write corruption in the user's folder). Keeps last 30 files, deletes older.
 
 **AI Verification Checklist**:
-- `schemaVersion` missing → defaults to 1 (NOT an error). Verify this with unit test using a JSON string without schemaVersion
-- `category` case-insensitive: `"novel"`, `"Novel"`, `"NOVEL"` all map to `MediaCategory.NOVEL`
-- `userStatus` case-insensitive: `"reading"`, `"Reading"`, `"READING"` all map to `UserStatus.READING`
-- Export uses temp-file write + contentResolver.copyTo() to prevent partial corruption (NEVER renameTo() on a content:// URI)
-- Merge preserves order deterministically (LinkedHashMap)
-- Merge normalizes every item in the result
-- **Merge stamps pure-additions with `System.currentTimeMillis()` only when they lack a valid timestamp**: items present only in the imported list preserve their historical `lastUpdated` if it is > 0L. Only items without a valid timestamp (null, 0, or negative) get `System.currentTimeMillis() - index`. Items that existed on both sides retain their conflict-resolved timestamp (epoch 0 → local wins). Verify with a test: local items A+B, imported items B+C where C has `lastUpdated = 1700000000000` → result has A (local lastUpdated), B (local wins), C (preserved historical timestamp ≈ 1700000000000).
 - `replaceAll` imports through repository — goes through `normalize()` (invariant enforcement)
 - Serialization uses kotlinx.serialization with `@SerialName` annotations if field names differ from Kotlin property names
 - Test round-trip: serialize → deserialize → serialize → compare
@@ -843,10 +962,19 @@ object BackupManager {
 
 **State Management**:
 ```kotlin
+enum class StatusFilter(val displayName: String) {
+    ALL("All"),
+    IN_PROGRESS("In Progress"),
+    COMPLETED("Completed"),
+    ON_HOLD("On Hold"),
+    DROPPED("Dropped"),
+    PLAN_TO("Plan to")
+}
+
 data class HomeUiState(
     val items: List<MediaItem> = emptyList(),
     val selectedCategory: MediaCategory? = null,  // null = "All"
-    val selectedStatus: UserStatus? = null,        // null = "All"
+    val selectedStatus: StatusFilter = StatusFilter.ALL,
     val sortOrder: SortOrder = SortOrder.DATE_ADDED_DESC,
     val isLoading: Boolean = true
 )
@@ -860,7 +988,7 @@ enum class SortOrder {
 
 sealed interface HomeAction {
     data class SelectCategory(val category: MediaCategory?) : HomeAction
-    data class SelectStatus(val status: UserStatus?) : HomeAction
+    data class SelectStatus(val status: StatusFilter) : HomeAction
     data class SelectSort(val sortOrder: SortOrder) : HomeAction
     data class OpenDetail(val itemId: String) : HomeAction
 }
@@ -870,7 +998,7 @@ sealed interface HomeUiEvent {
 }
 ```
 
-**Filtering Strategy**: Uses `combine` on `StateFlow<MediaCategory?>`, `StateFlow<UserStatus?>`, and `StateFlow<SortOrder>` to let SQLite do the work:
+**Filtering Strategy**: Uses `combine` on `StateFlow<MediaCategory?>`, `StateFlow<StatusFilter>`, and `StateFlow<SortOrder>` to let SQLite do the work:
 
 ```kotlin
 class HomeViewModel(
@@ -878,14 +1006,14 @@ class HomeViewModel(
 ) : ViewModel() {
 
     private val selectedCategoryFlow = MutableStateFlow<MediaCategory?>(null)
-    private val selectedStatusFlow = MutableStateFlow<UserStatus?>(null)
+    private val selectedStatusFlow = MutableStateFlow<StatusFilter>(StatusFilter.ALL)
     private val sortOrderFlow = MutableStateFlow(SortOrder.DATE_ADDED_DESC)
 
     val uiState: StateFlow<HomeUiState> = combine(
         selectedCategoryFlow, selectedStatusFlow, sortOrderFlow
     ) { category, status, sort -> Triple(category, status, sort) }
         .flatMapLatest { (category, status, sort) ->
-            repository.observeFiltered(category, status, sort)
+            repository.observeFiltered(category, status)
                 .map { items ->
                     HomeUiState(
                         items = items,
@@ -899,7 +1027,7 @@ class HomeViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
     fun selectCategory(category: MediaCategory?) { selectedCategoryFlow.value = category }
-    fun selectStatus(status: UserStatus?) { selectedStatusFlow.value = status }
+    fun selectStatus(status: StatusFilter) { selectedStatusFlow.value = status }
     fun selectSort(sort: SortOrder) { sortOrderFlow.value = sort }
 
     // One-shot event channel for navigation/intents
@@ -1131,6 +1259,30 @@ class MediaRepositoryImpl(
 
     override fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>> {
         return dao.observeByCategory(category.name)
+            .map { entities ->
+                entities.mapNotNull { entity ->
+                    runCatching { entity.toDomain() }.getOrNull()
+                }
+            }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .catch { e ->
+                Log.e("MediaRepository", "DB query failed (possible corruption)", e)
+                emit(emptyList())
+            }
+    }
+
+    override fun observeFiltered(category: MediaCategory?, statusFilter: StatusFilter): Flow<List<MediaItem>> {
+        val catName = category?.name
+        val (filterType, exactStatus) = when (statusFilter) {
+            StatusFilter.ALL -> "ALL" to null
+            StatusFilter.IN_PROGRESS -> "IN_PROGRESS" to null
+            StatusFilter.COMPLETED -> "EXACT" to UserStatus.COMPLETED.name
+            StatusFilter.ON_HOLD -> "EXACT" to UserStatus.ON_HOLD.name
+            StatusFilter.DROPPED -> "EXACT" to UserStatus.DROPPED.name
+            StatusFilter.PLAN_TO -> "EXACT" to UserStatus.PLAN_TO.name
+        }
+        return dao.observeFiltered(catName, filterType, exactStatus)
             .map { entities ->
                 entities.mapNotNull { entity ->
                     runCatching { entity.toDomain() }.getOrNull()

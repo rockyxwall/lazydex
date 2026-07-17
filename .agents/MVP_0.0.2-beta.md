@@ -12,7 +12,8 @@
 - [ ] SAF folder picker (`ACTION_OPEN_DOCUMENT_TREE`) — user selects destination directory
 - [ ] Persisted URI via `takePersistableUriPermission`
 - [ ] WorkManager `PeriodicWorkRequest` (min interval: Daily = 24h, Weekly = 168h)
-- [ ] Timestamped filenames: `lazydex_backup_YYYY-MM-DD_HHmmss.json`
+- [ ] Timestamped filenames: `lazydex_backup_YYYY-MM-DD_HHmmss.lazydex` (ZIP archive containing backup.json and optional covers/)
+- [ ] Safe copy flow: writes to temp file in app-internal storage first, packages ZIP, and only copies to the SAF directory once it is fully validated (prevents partial-write corruption)
 - [ ] Retention policy: keep last 30 backup files, auto-delete older
 - [ ] UI feedback: last backup timestamp in Settings
 - [ ] Error handling: failed backup → notification (not just toast, since user may not be in app)
@@ -57,23 +58,29 @@
   - [ ] `update()` — `normalize()` clamping, lastUpdated set
   - [ ] `incrementProgress()` / `decrementProgress()` — atomic, no race
   - [ ] `replaceAll()` — atomic, normalize on each item, exception mapping
-  - [ ] Duplicate URL — `DuplicateUrlException` thrown
-- [ ] `MetadataScraper` tests:
+  - [ ] `MetadataScraper` tests:
   - [ ] Valid URL → parsed metadata
   - [ ] Invalid URL → error
-  - [ ] Timeout → error
-  - [ ] Non-HTML response → error
-  - [ ] Large response → abort
-- [ ] `BackupProcessor` tests:
+  - [ ] Timeout → timeout Result via `withTimeout(30_000L)`
+  - [ ] Non-HTML response → Content-Type check error
+  - [ ] Large response → abort via `SizeLimitedSource`
+  - [ ] Auto-charset sniffing → correct parsing without mojibake (null charset)
+  - [ ] SSRF SafeDns → local/loopback IPs blocked
+- [ ] `BackupProcessor` and `BackupManager` tests:
   - [ ] Round-trip: serialize → deserialize → serialize → compare
+  - [ ] ZIP export packaging (backup.json + optional covers/)
+  - [ ] ZIP import extraction and parsing
   - [ ] Missing schemaVersion → default 1
   - [ ] Schema > 1 → rejected
   - [ ] Empty items → empty list
   - [ ] Missing id → UUID generated
   - [ ] Missing title → item rejected
-  - [ ] Bad status → defaulted
+  - [ ] Bad status → defaulted to category-adaptive status
   - [ ] Negative progress → clamped to 0
+  - [ ] Notes, coverImageUrl, dateAdded preserve/serialize correctly
   - [ ] Merge: timestamps, local wins tie, pure-additions preserve timestamps
+  - [ ] Merge duplicate by URL: force local ID mapping to prevent SQLite constraint failures
+  - [ ] Merge cover restoration: tie cover image copy/overwrite to conflict resolution winner
   - [ ] All normalized after merge
 - [ ] `UrlNormalizer` tests:
   - [ ] Lowercase scheme+host

@@ -22,6 +22,7 @@
   - `alternativeTitles` (String — JSON array)
   - `sourceUrl` (String?, nullable with UNIQUE index)
   - `coverImagePath` (String — local file path, empty = no cover)
+  - `coverImageUrl` (String?, nullable original cover URL)
   - `currentProgress` (Int)
   - `totalItems` (Int?)
   - `userStatus` (String — uppercase enum name)
@@ -35,6 +36,7 @@
 ### DAO (`MediaItemDao`)
 - [x] `observeAll()` — Flow of all items, ordered by `dateAdded DESC`
 - [x] `observeByCategory(category)` — Flow filtered by category
+- [x] `observeFiltered(category, filterType, exactStatus)` — Flow filtered by category and StatusFilter mapping
 - [x] `observeAllByDateAdded()` — explicit sort query
 - [x] `observeAllByLastUpdated()` — sort by last updated
 - [x] `observeAllByTitle()` — sort alphabetically
@@ -51,10 +53,10 @@
 - [x] `updateStatus(id, status, now)` — atomic status update
 - [x] `deleteById(id)` — delete single item
 - [x] `deleteAll()` — clear table
-- [x] `replaceAll(items)` — `@Transaction` wrapping `deleteAll()` + `upsertAll()`
+- [x] `replaceAll(items)` — `@Transaction` default method wrapping `deleteAll()` + `upsertAll()`
 
 ### Repository (`MediaRepository`)
-- [x] Interface (`MediaRepository`) — contract with `observe*`, `get*`, `existsByUrl`, `add`, `update`, `delete`, `incrementProgress`, `decrementProgress`, `setStatus`, `replaceAll`
+- [x] Interface (`MediaRepository`) — contract with `observe*`, `observeFiltered`, `get*`, `existsByUrl`, `add`, `update`, `delete`, `incrementProgress`, `decrementProgress`, `setStatus`, `replaceAll`
 - [x] Implementation (`MediaRepositoryImpl`)
 - [x] **Every write path calls `MediaItem.normalize()`** before persisting:
   - [x] `add()` → `UUID.randomUUID()`, `lastUpdated = now`, `.normalize()`, upsert
@@ -84,6 +86,7 @@
   - `alternativeTitles: List<String>`
   - `sourceUrl: String?`
   - `coverImagePath: String`
+  - `coverImageUrl: String?`
   - `currentProgress: Int`
   - `totalItems: Int?`
   - `userStatus: UserStatus`
@@ -92,15 +95,17 @@
   - `lastUpdated: Long`
   - `dateAdded: Long`
 - [x] `normalize()` method — **single invariant enforcement point**:
-  - Trims whitespace from title, sourceUrl, coverImagePath, notes
+  - Trims whitespace from title, sourceUrl, coverImagePath, coverImageUrl, notes
+  - Ensures title is never blank (defaults to "Untitled")
   - Filters blank alt titles
   - Clamps `currentProgress` to `[0, totalItems]` when total is non-null
   - Clamps `currentProgress >= 0` when total is null
   - Caps `rating` to `1.0–5.0` via `coerceIn`
   - Normalizes `sourceUrl` through `UrlNormalizer.normalize()`
+  - Validates `coverImageUrl` scheme is HTTP/HTTPS, otherwise null
 
 ### Utilities
-- [x] `UrlNormalizer` — canonical URL normalizer (lowercase scheme+host, remove fragment, trim trailing slash, no Android dependency)
+- [x] `UrlNormalizer` — canonical URL normalizer using OkHttp's `HttpUrl` (lowercase scheme+host, remove fragment, trim trailing slash)
 
 ---
 
@@ -116,28 +121,28 @@
 - [x] Cards are **READ-ONLY** — no progress buttons, no long-press menus
 - [x] `FilterBottomSheet` (ModalBottomSheet):
   - Category section: [All] [Novel] [Manga] [Anime] [Game] [Movie] [TV]
-  - Status section: [All] [Reading] [Watching] [Playing] [Completed] [On Hold] [Dropped] [Plan to]
+  - Status section: [All] [In Progress] [Completed] [On Hold] [Dropped] [Plan to] (mapped via StatusFilter)
   - [Clear Filters] button
 - [x] `SortBottomSheet` (ModalBottomSheet):
   - Sort by: [Date Added] [Last Active] [Title] [Progress %]
   - Order: [↑ Ascending] [↓ Descending]
   - Current selection highlighted
-- [x] State: `HomeUiState` with `items`, `selectedCategory`, `selectedStatus`, `sortOrder`, `isLoading`
+- [x] State: `HomeUiState` with `items`, `selectedCategory`, `selectedStatus` (StatusFilter), `sortOrder`, `isLoading`
 - [x] Default sort: `DATE_ADDED_DESC` (no teleporting)
-- [x] ViewModel: `HomeViewModel` — observes filtered/sorted Flow from repository
+- [x] ViewModel: `HomeViewModel` — observes filtered/sorted Flow from repository, maps StatusFilter to database status query
 
 ### 3.2 UnifiedAddEditScreen — Add + Edit Modes
 - [x] **Add mode**: empty fields, URL scrape trigger visible, no delete button
 - [x] **Edit mode**: pre-filled from DB via `observeById(id)`, delete button visible in toolbar
 - [x] **URL field** (add mode) with [Auto-fill] button → triggers scrape
 - [x] **Cover image** area — Coil async loading from local path, gradient+initials fallback
-- [x] **Title field** — required, editable
+- [x] **Title field** — required, editable. Triggers error if blank on Save
 - [x] **Alternative Titles** — dynamic list:
   - [↕] swap with main title
   - [×] remove
   - [+ Add Alternative Title] button
-- [x] **Category chips** — all 6 categories, selectable
-- [x] **Status chips** — all 5 statuses, category-adaptive smart default:
+- [x] **Category chips** — all 6 categories, selectable (re-maps in-progress status on change)
+- [x] **Status chips** — 5 category-adaptive status options, smart default:
   - Novel/Manga → Reading
   - Anime/Movie/TV → Watching
   - Game → Playing
@@ -145,26 +150,26 @@
 - [x] **Progress** / **Total** — number fields with safe Int parsing
 - [x] **Validation**: red error text + disabled Save when progress > total
 - [x] **Notes** — multiline text field
-- [x] **Cover URL** field (optional, visible if scrape fails or manual entry)
+- [x] **Cover URL** field (optional, visible if scrape fails or manual entry) → triggers local download
 - [x] **Source URL** field — editable, with [Open URL] button (launches browser)
 - [x] **Save button** — disabled if validation fails:
   - Title blank → inline error
   - Progress > total → inline error
   - Invalid URL format → inline error
-- [x] **Delete button** (edit mode only) → confirmation dialog → `repository.delete(id)` → pop back
+- [x] **Delete button** (edit mode only) → confirmation dialog → `repository.delete(id)` → pop back (sends navigation event)
 - [x] **Discard changes dialog** on back press if unsaved edits exist
 - [x] **State flow**: IDLE → SCRAPING → AUTO-FILLED → VALIDATING → SAVING → DONE (pop back)
 - [x] Scrape flow: blocked fields (title, cover, alt titles, category) show spinner during scrape; active fields (progress, total, status, notes, rating) remain editable
-- [x] ViewModel: `UnifiedAddEditViewModel` — draft `MutableStateFlow` independent of Room re-emissions
+- [x] ViewModel: `UnifiedAddEditViewModel` — fully hoists form state in a `MutableStateFlow` (no split-brain rememberSaveable)
 - [x] `SavedStateHandle` for nav args (itemId for edit mode, null for add)
 
 ### 3.3 SettingsScreen
 - [x] TopAppBar: "Settings" with back navigation
 - [x] **Data section**:
-  - [Export Backup] → SAF CreateDocument → serialize → write to temp file → copy to SAF URI → delete temp
-  - [Import Backup] → SAF OpenDocument → deserialize → choice dialog: [Merge] or [Overwrite]
-    - Merge: `BackupProcessor.merge(local, imported)` → `repository.replaceAll(merged)`
-    - Overwrite: press-and-hold 5–10s → `repository.replaceAll(imported)`
+  - [Export Backup] → Dialog: "Include Cover Images?" (Metadata Only or Metadata + Covers) → SAF CreateDocument (backup.lazydex) → package ZIP archive with backup.json and optional covers/ directory -> copy to SAF → delete temp
+  - [Import Backup] → SAF OpenDocument (.lazydex) → copy to cache and unzip -> parse backup.json -> choice dialog: [Merge] or [Overwrite]
+    - Merge: `BackupProcessor.merge(local, imported)` → `repository.replaceAll(merged)` -> copy covers to storage for new/overwritten items
+    - Overwrite: press-and-hold 5–10s → `repository.replaceAll(imported)` -> restore all covers from ZIP
 - [x] **Theme section**:
   - Theme Mode: [System] [Dark] [Light] selector (Dark default)
   - Amoled Mode: toggle (pure black backgrounds)
@@ -172,7 +177,7 @@
   - LazyDex v0.0.1-beta
   - "Built with Kotlin & Jetpack Compose"
   - [Open Source Licenses] → licenses screen/dialog
-- [x] ViewModel: `SettingsViewModel` — theme prefs via DataStore, import/export orchestration
+- [x] ViewModel: `SettingsViewModel` — theme prefs via DataStore, import/export orchestration (runs I/O on Dispatchers.IO, CPU tasks on Dispatchers.Default)
 - [x] Error handling: export failure → Toast, import failure → dialog, corrupt backup → dialog, empty backup → dialog
 
 ---
@@ -181,7 +186,7 @@
 
 ### MetadataScraper
 - [x] Takes `OkHttpClient` as constructor parameter (injectable, testable)
-- [x] `suspend fun scrape(url: String): Result<ScrapedMetadata>`
+- [x] `suspend fun scrape(url: String): Result<ScrapedMetadata>` wrapped in `withTimeout(30_000L)`
 - [x] `ScrapedMetadata(title, imageUrl, alternativeTitles)`
 - [x] URL validation:
   - Must start with `https://` — reject `http://` and non-http schemes
@@ -192,7 +197,8 @@
 - [x] Normalize URL via `UrlNormalizer.normalize(url)` before request
 - [x] OkHttp config: connect 10s, read 15s, write 10s, follow redirects=true, max 5, modern mobile User-Agent, no cookie jar
 - [x] `withContext(Dispatchers.IO)` for network, `withContext(Dispatchers.Default)` for Jsoup.parse()
-- [x] Size limit: abort if >5MB (Content-Length check + BoundedInputStream)
+- [x] Size limit: abort if >5MB via custom Okio `SizeLimitedSource` throwing `IOException`
+- [x] Charset: Pass `null` to Jsoup parser to allow sniffing encoding automatically (prevents mojibake)
 - [x] Extract: `og:title` > `twitter:title` > `<title>`
 - [x] Extract: `og:image` > `twitter:image` > first `<img>` (resolve relative via `absUrl()`)
 - [x] Keep `og:image` scheme as-is (do not upgrade http→https)
@@ -205,7 +211,7 @@
 ### Serialization/Deserialization
 - [x] `BackupProcessor` — kotlinx.serialization, `ignoreUnknownKeys = true`, case-insensitive enums
 - [x] `BackupEnvelopeDto(schemaVersion, items)` — versioned envelope
-- [x] `MediaItemBackupDto` — all fields nullable (robust deserialization)
+- [x] `MediaItemBackupDto` — all fields nullable (robust deserialization) including `coverImageUrl`, `notes`, and `dateAdded`
 - [x] `serialize(items)`: domain → DTO → JSON
 - [x] `deserialize(json)`: JSON → envelope → DTO → domain (with sanitization)
 - [x] Deserialization rules:
@@ -215,22 +221,22 @@
   - Item missing `id` → generate UUID
   - Item missing `title` → reject that item
   - Bad category → reject item
-  - Bad userStatus → default to category-appropriate in-progress status
+  - Bad userStatus → default to category-appropriate status
   - Negative/null progress → clamp to 0
   - Negative total → treat as null
   - Missing/null/0 lastUpdated → epoch 0 (NOT import time)
+  - Missing/null/0 dateAdded → default to current system time
   - Empty file → throw
-  - File > 10MB → abort
+  - File > 50MB → abort
 
 ### BackupManager
-- [x] `export()`: write to temp file → copy to SAF URI via contentResolver → delete temp
-- [x] `import()`: read from SAF URI → return bytes for deserialization
-- [x] Temp file: UUID-based name in `context.cacheDir` (no collision)
-- [x] Use `"wt"` mode (write+truncate) for SAF output stream
-- [x] BufferedWriter with UTF-8, no BOM
+- [x] `export()`: packages backup.json metadata and optional local covers/ folder into `.lazydex` ZIP archive
+- [x] `import()`: unzips `.lazydex` file, extracts backup.json, and provides temporary covers directory for restoration
+- [x] Temp files cleaned up safely via `try/finally` block to prevent storage leaks
+- [x] Use `"wt"` mode (write+truncate) for SAF output stream to prevent trailing garbage
 
 ### Merge Logic (`BackupProcessor.merge()`)
-- [x] Keyed by `id` (UUID string)
+- [x] Keyed by BOTH `id` and normalized `sourceUrl`. Group by normalized URL first, resolve conflicts, and force the winning model to adopt the local database's `id`.
 - [x] Conflicts: newer `lastUpdated` wins
 - [x] Tie: local wins (deterministic)
 - [x] Items only in local → keep as-is
@@ -239,6 +245,7 @@
   - Stamp with `System.currentTimeMillis() - index` only if timestamp is 0/null/negative
 - [x] Use `LinkedHashMap` for deterministic ordering
 - [x] All merged items normalized before return
+- [x] Cover image restore/overwrite is tied to conflict resolution: if imported metadata wins or is new, extract and copy its cover from ZIP; otherwise, keep local cover.
 
 ---
 
@@ -327,8 +334,7 @@
 6. **No ProGuard/R8 rules** — default Android optimization only
 7. **Single language** — English `strings.xml` only (i18n deferred)
 8. **No accessibility audit** — basic content descriptions may be incomplete
-9. **Cover images are local-only** — exporting backup does not include cover image files
-10. **Rating color interpolation** — not implemented; stars use default star color (deferred)
+9. **Rating color interpolation** — not implemented; stars use default star color (deferred)
 
 ---
 

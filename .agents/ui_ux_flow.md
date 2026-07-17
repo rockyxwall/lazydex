@@ -365,25 +365,28 @@ ViewModel
 **Export Flow**:
 ```
 Tap Export
-    → SAF CreateDocument launcher (suggest "lazydex_backup.json")
+    → Dialog: "Include Cover Images?" (options: Metadata Only or Metadata + Cover Images)
+    → SAF CreateDocument launcher (suggest "backup.lazydex")
         → User picks location
             → repository.getAll()
-            → BackupProcessor.serialize(items)       ← streaming to avoid OOM
-            → BackupManager.export(context, uri, json)
-                → Write to temp file (unique UUID name)
-                → Copy to SAF URI via contentResolver
-                → Delete temp file
+            → Package ZIP archive (with random UUID temp file name in app cache):
+                - Create "backup.json" inside ZIP containing the serialized JSON metadata
+                - If cover images option is selected, copy all local cover images from storage into "covers/" directory inside ZIP
+            → Copy completed ZIP archive to SAF URI via contentResolver
+            → Delete temp ZIP file
             → Toast "Backup exported successfully"
 ```
 
 **Import Flow**:
 ```
 Tap Import
-    → SAF OpenDocument launcher (filter: application/json)
+    → SAF OpenDocument launcher (filter for .lazydex files)
         → User picks file
-            → BackupManager.import(context, uri)     ← streaming JSON
-            → BackupProcessor.deserialize(json) → List<MediaItem>
-            → Guard: if empty → error "No valid items found"
+            → Copy SAF ZIP archive to temporary file in app cache
+            → Extract ZIP:
+                - Read and parse "backup.json"
+                - Check for "covers/" directory inside ZIP
+            → Guard: if metadata empty → error "No valid items found"
             → Show choice dialog:
                 ┌────────────────────────┐
                 │  Import Options        │
@@ -399,8 +402,13 @@ Tap Import
                     │
                     ├─ Merge → BackupProcessor.merge(local, imported)
                     │          → repository.replaceAll(merged)
+                    │          → For conflict resolution / new items: if imported item
+                    │            wins or is a new addition, copy its cover from ZIP to
+                    │            local storage. Otherwise, keep local cover.
                     │
                     └─ Overwrite → repository.replaceAll(imported)
+                    │          → Replace all local cover images with those from ZIP.
+            → Delete temporary ZIP and extracted files
             → Toast "Imported X items"
 ```
 
@@ -412,15 +420,18 @@ Tap Import
 // Pure-additions with valid timestamps keep them
 // Items without timestamps (0L) get staggered current time
 // All results normalized before persist
+// Cover image restore/overwrite is tied to conflict resolution:
+// If imported metadata wins or is new, extract and copy its cover from ZIP; local wins/no imported cover -> keep local cover
 ```
 
 **Overwrite Safety**: Press-and-hold the confirmation button for 5–10 seconds to execute destructive overwrite.
 
 **Auto-Backup Directory**: When user selects a backup schedule, SAF folder picker (`ACTION_OPEN_DOCUMENT_TREE`) opens → user selects destination folder → URI persisted via `takePersistableUriPermission` → displayed in Settings UI.
+Auto-backup worker writes to a temporary file in app-internal storage first, packages the ZIP (including covers if enabled), and only copies the completed ZIP to the SAF directory once it is fully validated (prevents partial-write corruption in the user's folder).
 
 **Edge Cases**:
 - Empty backup file → "Backup file contains no valid items" error
-- Corrupted JSON → error dialog "Backup file appears corrupted"
+- Corrupted JSON or ZIP → error dialog "Backup file appears corrupted"
 - Old backup (no schemaVersion) → defaults to 1, loads successfully
 - Schema version > 1 → "Unsupported backup schema version: X"
 - File > 50MB → abort with "Backup file is too large"
@@ -541,6 +552,7 @@ MaterialTheme(colorScheme = finalScheme, typography, shapes)
             "title": "Example Novel",
             "alternativeTitles": ["Alt Title 1", "Alt Title 2"],
             "sourceUrl": "https://novel.site.com/example",
+            "coverImageUrl": "https://novel.site.com/covers/example.jpg",
             "currentProgress": 42,
             "totalItems": 100,
             "userStatus": "READING",
@@ -557,6 +569,6 @@ MaterialTheme(colorScheme = finalScheme, typography, shapes)
 - `alternativeTitles`: JSON array (flexible list, not limited to 2)
 - `rating`: 1.0–5.0 stars (nullable = unrated)
 - `dateAdded`: Timestamp for stable sort order (no teleporting)
-- `coverImageUrl` removed (covers stored as local files, not URLs)
+- `coverImageUrl`: Nullable string representing the original source URL of the cover image (used for fallback re-download)
 
 **Robustness**: Missing/invalid fields handled gracefully — missing schemaVersion defaults to 1, missing title rejects item, bad status defaults to category-appropriate status, negative progress clamped to 0, missing lastUpdated → epoch 0 (local wins in merge).
