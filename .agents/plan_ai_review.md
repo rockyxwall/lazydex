@@ -1,6 +1,15 @@
-# LazyDex — Implementation Plan
+# LazyDex — Implementation Plan (AI Audit/Review Only)
 
-> **Audience**: This document is for an AI agent tasked with auditing, validating, and building the LazyDex Android application. The AI must be **merciless** — find every inconsistency, every missing edge case, every race condition, every performance trap, every deviation from best practices. Do not assume anything is correct. Verify everything. Question every decision below. If you find a flaw, flag it **and propose the proper correction** before proceeding. Every flagged issue must include a concrete, actionable fix — not just a warning. All proposed solutions must strictly follow the architectural rules, conventions, and decisions documented in this plan (e.g., domain purity, normalize() enforcement, atomic SQL, epoch-0 default, etc.). Do not suggest workarounds that bypass or contradict these requirements.
+> **Task: Review this implementation plan and find ALL bugs, inconsistencies, missing edge cases, and design flaws. Do NOT build or generate any code. This is a review-only exercise.**
+>
+> **Audience**: This document is for an AI agent tasked with auditing and validating the LazyDex Android application implementation plan. The AI must be **merciless** — find every inconsistency, every missing edge case, every race condition, every performance trap, every deviation from best practices. Do not assume anything is correct. Verify everything. Question every decision below. If you find a flaw, flag it **and propose the proper correction**. Every flagged issue must include a concrete, actionable fix — not just a warning. All proposed solutions must strictly follow the architectural rules, conventions, and decisions documented in this plan (e.g., domain purity, normalize() enforcement, atomic SQL, epoch-0 default, etc.). Do not suggest workarounds that bypass or contradict these requirements.
+>
+> **Workflow**:
+> 1. Read the entire plan from top to bottom
+> 2. Cross-reference every section for contradictions and omissions
+> 3. Verify every code snippet compiles logically (even if not runnable in this context)
+> 4. Flag every issue with section reference, explanation, and concrete fix
+> 5. Keep auditing — find MORE issues. Previous audits found 6+ issues; there are always more.
 
 ---
 
@@ -195,7 +204,7 @@ data class MediaItem(
     val id: String,              // UUID string
     val category: MediaCategory,
     val title: String,
-    val sourceUrl: String,
+    val sourceUrl: String?,      // Nullable — SQLite UNIQUE index treats NULLs as non-duplicates
     val coverImageUrl: String,   // Can be empty
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
@@ -211,6 +220,7 @@ data class MediaItem(
      * This is the SINGLE invariant enforcement point.
      */
     fun normalize(): MediaItem {
+        val normalizedUrl = sourceUrl?.takeIf { it.isNotBlank() }?.let { UrlNormalizer.normalize(it) }
         val safeTotal = totalItems?.takeIf { it >= 0 }
         val safeProgress = when {
             currentProgress < 0 -> 0
@@ -219,7 +229,7 @@ data class MediaItem(
         }
         return copy(
             title = title.trim(),
-            sourceUrl = UrlNormalizer.normalize(sourceUrl),
+            sourceUrl = normalizedUrl,
             coverImageUrl = coverImageUrl.trim(),
             totalItems = safeTotal,
             currentProgress = safeProgress,
@@ -237,7 +247,7 @@ data class MediaItemEntity(
     @PrimaryKey val id: String,
     val category: String,        // Stored as uppercase string (e.g. "NOVEL"), no ambiguity
     val title: String,
-    val sourceUrl: String,
+    val sourceUrl: String?,      // Nullable — multiple NULLs allowed under UNIQUE index
     val coverImageUrl: String,
     val currentProgress: Int,
     val totalItems: Int?,
@@ -257,7 +267,7 @@ data class MediaItemEntity(
 - `lastUpdated` must be set on every mutation (add, edit, increment, decrement, status change)
 - Entity ↔ Domain mapping uses `MediaCategory.fromString()` and `UserStatus.fromString()` — case-insensitive, defaults to null for unknown values → fail closed (reject the item or skip). The repository must wrap the mapping in try/catch inside `mapNotNull` to prevent a single corrupted row (e.g., from a future backup restore introducing "PODCAST") from crashing the entire Flow stream with a NullPointerException
 - Room TypeConverters or column types? **Decision**: store enum strings directly as columns, use `@TypeConverters` only if you need reusable conversion. Since the DAO already works with raw strings, skip TypeConverters. The repository handles entity↔domain mapping.
-- **`sourceUrl` has a SQLite UNIQUE index** (`@Entity(indices = [Index(value = ["sourceUrl"], unique = true)])`). This is a database-level safeguard — duplicate URL detection is NOT solely the UI's responsibility. The repository must catch `SQLiteConstraintException` and map it to a domain exception. See Section 4.4 for error handling.
+- **`sourceUrl` has a SQLite UNIQUE index** (`@Entity(indices = [Index(value = ["sourceUrl"], unique = true)])`). **sourceUrl must be nullable (`String?`)** — SQLite treats empty strings `""` as equal under a UNIQUE index, so a second item with no URL would throw `SQLiteConstraintException`. Null values are never considered duplicates. This is a database-level safeguard — duplicate URL detection is NOT solely the UI's responsibility. The repository must catch `SQLiteConstraintException` and map it to a domain exception. See Section 4.4 for error handling.
 
 ### 4.2 Room Database
 
@@ -483,7 +493,20 @@ The scraper in 4.5 calls `UrlNormalizer.normalize(url)` for its normalization st
 - Atomic increment/decrement means NO debounce in the ViewModel. "Rapid tap" is safe. Remove the debounce suggestion from 4.10.1
 - Optimistic locking (stale-edit detection) is NOT implemented for v1. See 4.10.5 for rationale
 - Error handling: repository wraps DB exceptions and rethrows as `DataAccessException` (a custom sealed class or RuntimeException subclass). Alternatively, use Kotlin `Result<T>` for all write operations
-- **UNIQUE constraint on `sourceUrl`**: The entity has a SQLite UNIQUE index on `sourceUrl`. If the repository's `add()` or `update()` triggers a `SQLiteConstraintException` (e.g., an edge case bypasses the UI-level duplicate check), the repository must catch it and map it to a `DuplicateUrlException` domain exception. Do NOT let raw constraint violations propagate to the ViewModel.
+- **UNIQUE constraint on `sourceUrl`**: The entity has a SQLite UNIQUE index on `sourceUrl`. If the repository's `add()`, `update()`, or `replaceAll()` triggers a `SQLiteConstraintException` (e.g., an edge case bypasses the UI-level duplicate check), the repository must catch it and map it to a `DuplicateUrlException` domain exception. Do NOT let raw constraint violations propagate to the ViewModel.
+- **`replaceAll()` exception handling**: `replaceAll()` must catch `SQLiteConstraintException` and map it to an `ImportFailedException` so the ViewModel can surface a user-friendly error during import instead of crashing:
+  ```kotlin
+  override suspend fun replaceAll(items: List<MediaItem>) = withContext(Dispatchers.IO) {
+      try {
+          val entities = items.map { it.normalize().toEntity() }
+          dao.replaceAll(entities)
+      } catch (e: SQLiteConstraintException) {
+          throw ImportFailedException("Import failed: duplicate source URL detected", e)
+      } catch (e: Exception) {
+          throw ImportFailedException("Import failed due to database error", e)
+      }
+  }
+  ```
 
 ### 4.5 Metadata Scraper
 
@@ -515,6 +538,23 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 - Max length: 2048 characters (standard URL max)
 - Reject IP-address-based URLs (security: no `https://192.168.x.x` or `https://10.x.x.x`)
 - Reject known malicious patterns (e.g., URLs containing JavaScript schemes, `data:` URIs, `file://`)
+- **SSRF Protection**: Simple URL string matching is insufficient — it misses loopback addresses, secondary local ranges (e.g. `172.16.x.x`), IPv6 locals (`::1`, `fe80::`), and is vulnerable to DNS rebinding (a public domain resolving to a local IP). Implement a custom OkHttp `Dns` resolver as the sole SSRF defense — it blocks private networks at the DNS lookup level, which catches ALL the above cases including rebinding. Do NOT rely on URL pattern matching alone:
+  ```kotlin
+  class SafeDns : Dns {
+      override fun lookup(hostname: String): List<InetAddress> {
+          val addresses = Dns.SYSTEM.lookup(hostname)
+          for (address in addresses) {
+              if (address.isLoopbackAddress || 
+                  address.isSiteLocalAddress || 
+                  address.isLinkLocalAddress || 
+                  address.isAnyLocalAddress) {
+                  throw IOException("Access to local/private network addresses is blocked")
+              }
+          }
+          return addresses
+      }
+  }
+  ```
 - Normalize before duplicate check: lowercase scheme + host, trim trailing slashes, strip fragments
 
 **Edge Cases & Errors the AI MUST Handle**:
@@ -616,13 +656,14 @@ object BackupProcessor {
     }
 
     @Serializable
-    private data class BackupEnvelope(
+    private data class BackupEnvelopeDto(
         val schemaVersion: Int = 1,
-        val items: List<MediaItem>
+        val items: List<MediaItemBackupDto>? = null
     )
 
     suspend fun serialize(items: List<MediaItem>): String = withContext(Dispatchers.Default) {
-        Json.encodeToString(BackupEnvelope(items = items))
+        val envelope = BackupEnvelopeDto(items = items.map { it.toDto() })
+        backupJson.encodeToString(envelope)
     }
 
     suspend fun deserialize(json: String): List<MediaItem> = withContext(Dispatchers.Default) {
@@ -631,6 +672,18 @@ object BackupProcessor {
     }
 
     suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem>
+
+    private fun MediaItem.toDto() = MediaItemBackupDto(
+        id = id,
+        category = category.name,
+        title = title,
+        sourceUrl = sourceUrl,
+        coverImageUrl = coverImageUrl,
+        currentProgress = currentProgress,
+        totalItems = totalItems,
+        userStatus = userStatus.name,
+        lastUpdated = lastUpdated
+    )
 }
 
 private fun MediaItemBackupDto.toDomain(): MediaItem? {
@@ -644,7 +697,7 @@ private fun MediaItemBackupDto.toDomain(): MediaItem? {
         id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
         category = safeCategory,
         title = safeTitle,
-        sourceUrl = sourceUrl?.trim() ?: "",
+        sourceUrl = sourceUrl?.trim(),
         coverImageUrl = coverImageUrl?.trim() ?: "",
         currentProgress = safeProgress,
         totalItems = safeTotal,
@@ -876,6 +929,7 @@ class HomeViewModel(
 - The route argument is `DetailRoute(val id: String)` (a `@Serializable` data class).
 - The `DetailViewModel` observes the `id` from `SavedStateHandle` via `getStateFlow<String>("id", "")` and `flatMapLatest`s into `repository.observeById(id)` — always working with the latest data from Room.
 - On save, calls `repository.update()`.
+- Editing sourceUrl to match another item triggers `SQLiteConstraintException` in the repository. The ViewModel must catch `DuplicateUrlException` and show an inline error: "This URL is already tracked by another item."
 - Must update `lastUpdated` on save (done by repository).
 - Delete shows confirmation dialog: "Delete 'Title'? This cannot be undone."
 - Discard changes on back press without confirmation (v1 simplicity).
@@ -973,52 +1027,52 @@ class MediaRepositoryImpl(
         return dao.observeAll()
             .map { entities ->
                 entities.mapNotNull { entity ->
-                    try {
-                        entity.toDomain()
-                    } catch (e: Exception) {
-                        // Skip corrupted/malformed rows — prevents NPE from
-                        // unknown enum values from crashing the entire Flow stream.
-                        // Room's invalidation tracker fires at the TABLE level,
-                        // so a single bad row could otherwise kill ALL active observers.
-                        null
-                    }
+                    runCatching { entity.toDomain() }.getOrNull()
                 }
             }
-            .distinctUntilChanged() // Suppress Room table-level invalidation noise
-            .flowOn(Dispatchers.Default) // CRITICAL: Force O(N) diffing off the main thread
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .catch { e ->
+                // Catches upstream DB query failures (e.g. SQLiteDatabaseCorruptException)
+                // that per-row try/catch in .map {} cannot reach
+                Log.e("MediaRepository", "DB query failed (possible corruption)", e)
+                emit(emptyList())
+            }
     }
 
     override fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>> {
         return dao.observeByCategory(category.name)
             .map { entities ->
                 entities.mapNotNull { entity ->
-                    try {
-                        entity.toDomain()
-                    } catch (e: Exception) {
-                        null // Skip corrupted row silently
-                    }
+                    runCatching { entity.toDomain() }.getOrNull()
                 }
             }
-            .distinctUntilChanged() // Suppress Room table-level invalidation noise
-            .flowOn(Dispatchers.Default) // CRITICAL: Force O(N) diffing off the main thread
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .catch { e ->
+                Log.e("MediaRepository", "DB query failed (possible corruption)", e)
+                emit(emptyList())
+            }
     }
 
     override fun observeById(id: String): Flow<MediaItem?> {
         return dao.observeById(id)
             .map { entity ->
-                try {
-                    entity?.toDomain()
-                } catch (e: Exception) {
-                    null
-                }
+                runCatching { entity?.toDomain() }.getOrNull()
             }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
+            .catch { e ->
+                Log.e("MediaRepository", "DB query failed (possible corruption)", e)
+                emit(null)
+            }
     }
 }
 ```
 
-Note: Separate DB corruption detection via `ensureDbHealthy()` is removed. Room opens the database lazily — corruption surfaces naturally on the first actual query and throws `SQLiteDatabaseCorruptException`. Catch it at the application entry point or during regular query subscriptions rather than adding a redundant `SELECT 1` health check.
+Note 1: Separate DB corruption detection via `ensureDbHealthy()` is removed. Room opens the database lazily — corruption surfaces naturally on the first actual query and throws `SQLiteDatabaseCorruptException`. Catch it at the application entry point or during regular query subscriptions rather than adding a redundant `SELECT 1` health check.
+
+Note 2: The per-row `runCatching` inside `.map {}` only catches domain mapping failures (e.g. invalid enum values). It does NOT catch upstream database query exceptions like `SQLiteDatabaseCorruptException`. The `.catch` operator on the Flow chain is required to handle those upstream failures gracefully — without it, a corrupt database would crash the entire Flow stream and the app.
 
 **Global Error Principles**:
 - Never crash with an unhandled exception. Every coroutine should have a try/catch or a `CoroutineExceptionHandler`.
@@ -1510,7 +1564,7 @@ gradlew.bat
 
 ---
 
-> **Final Instruction to AI**: Do not proceed until you have audited every section above. If you find ambiguities, contradictions, missing edge cases, or design flaws, flag them and propose corrections before writing any code. Be merciless.
+> **Final Instruction to AI**: Do not proceed until you have audited every section above. If you find ambiguities, contradictions, missing edge cases, or design flaws, flag them and propose corrections. This is a review-only document — do NOT build, generate, or write any code. Be merciless and keep finding more issues.
 
 ---
 
@@ -1619,6 +1673,39 @@ An exhaustive audit of the [implementation plan](file:///e:/lazyman/rockyxwall/0
   }
   ```
 
+### 3.4 UNIQUE Index + Empty String Duplicates (sourceUrl Nullable)
+* **Issue**: `sourceUrl` is declared as non-nullable `String` with a default of `""` (empty string). SQLite's UNIQUE index treats empty strings as equal — adding a second item without a URL throws `SQLiteConstraintException`.
+* **Reason**: SQLite considers all empty-string values equal under a UNIQUE constraint. Multiple NULL values are always permitted.
+* **Fix**: Change `sourceUrl` to nullable `String?` in both the domain model and the entity. The normalizer strips blanks to null; the entity column allows nulls:
+  ```kotlin
+  // domain
+  val sourceUrl: String?,
+  
+  // entity  
+  val sourceUrl: String?,
+  
+  // normalize()
+  val normalizedUrl = sourceUrl?.takeIf { it.isNotBlank() }?.let { UrlNormalizer.normalize(it) }
+  return copy(sourceUrl = normalizedUrl, ...)
+  ```
+
+### 3.5 Bulk Import Exception Handling in replaceAll
+* **Issue**: `replaceAll()` in the repository does not catch `SQLiteConstraintException` or other database errors. If the imported list contains duplicates (same normalized URL), the transaction throws and crashes the coroutine.
+* **Reason**: The DAO's `@Transaction replaceAll()` runs `deleteAll()` + `upsertAll()` atomically. A constraint violation in `upsertAll` rolls back the transaction and surfaces an unhandled exception to the ViewModel.
+* **Fix**: Wrap `dao.replaceAll()` in a try/catch in the repository and throw a domain-level `ImportFailedException`:
+  ```kotlin
+  override suspend fun replaceAll(items: List<MediaItem>) = withContext(Dispatchers.IO) {
+      try {
+          val entities = items.map { it.normalize().toEntity() }
+          dao.replaceAll(entities)
+      } catch (e: SQLiteConstraintException) {
+          throw ImportFailedException("Import failed: duplicate source URL detected", e)
+      } catch (e: Exception) {
+          throw ImportFailedException("Import failed due to database error", e)
+      }
+  }
+  ```
+
 ---
 
 ## 4. UI & State Management
@@ -1675,11 +1762,51 @@ An exhaustive audit of the [implementation plan](file:///e:/lazyman/rockyxwall/0
       ?.toInt()
   ```
 
+### 4.4 DetailScreen Duplicate-URL Error Path
+* **Issue**: If a user edits the `sourceUrl` in DetailScreen to match an existing item's URL, the repository's `update()` triggers a `SQLiteConstraintException` from the UNIQUE index. The ViewModel has no handling for this, so the exception crashes the coroutine.
+* **Reason**: The repository's `DuplicateUrlException` was defined in the interface but the DetailScreen implementation did not catch it.
+* **Fix**: Add error handling in `DetailViewModel.saveChanges()` and surface an inline error message:
+  ```kotlin
+  fun saveChanges(updatedItem: MediaItem) {
+      viewModelScope.launch {
+          try {
+              _errorMessage.value = null
+              repository.update(updatedItem)
+          } catch (e: DuplicateUrlException) {
+              _errorMessage.value = "This URL is already tracked by another item."
+          } catch (e: Exception) {
+              _errorMessage.value = "An error occurred while saving."
+          }
+      }
+  }
+  ```
+
 ---
 
 ## 5. Scraping & Networking
 
-### 5.1 CPU-Bound Parsing Executing on OkHttp Thread
+### 5.1 IP/SSRF Blocklist is Insufficient — DNS-Level Protection Required
+* **Issue**: The plan's URL validation rules reject IP-based URL strings (`https://192.168.x.x`, `https://10.x.x.x`) via pattern matching. This misses loopback addresses (127.x.x.x), secondary private ranges (172.16.x.x), link-local (169.254.x.x), IPv6 local addresses (`::1`, `fe80::`), and is completely vulnerable to DNS rebinding attacks where a public domain resolves to a local IP.
+* **Reason**: String-matching IP addresses in URLs is a fragile denylist approach that cannot cover all local address variants and cannot detect DNS rebinding.
+* **Fix**: Implement a custom OkHttp `Dns` resolver as the sole SSRF defense. This catches ALL private/local network addresses at the DNS resolution layer (before any HTTP request is made), including rebinding:
+  ```kotlin
+  class SafeDns : Dns {
+      override fun lookup(hostname: String): List<InetAddress> {
+          val addresses = Dns.SYSTEM.lookup(hostname)
+          for (address in addresses) {
+              if (address.isLoopbackAddress || 
+                  address.isSiteLocalAddress || 
+                  address.isLinkLocalAddress || 
+                  address.isAnyLocalAddress) {
+                  throw IOException("Access to local/private network addresses is blocked")
+              }
+          }
+          return addresses
+      }
+  }
+  ```
+
+### 5.2 CPU-Bound Parsing Executing on OkHttp Thread
 * **Issue**: In `MetadataScraper.scrape()`, the plan implements `suspendCancellableCoroutine` and executes `Jsoup.parse(boundedStream, ...)` directly inside the OkHttp callback thread (`onResponse`).
 * **Reason**: This directly contradicts the plan's own rule: *"Jsoup.parse() is CPU-bound and MUST run on Dispatchers.Default, NOT on OkHttp's IO dispatcher pool."*
 * **Fix**: Perform the scrape using `withContext` and a synchronous call with custom cancellation listener, then run `Jsoup.parse` on `Dispatchers.Default`:
@@ -1711,3 +1838,721 @@ An exhaustive audit of the [implementation plan](file:///e:/lazyman/rockyxwall/0
       }
   }
   ```
+
+---
+
+## 6. Flow & Reactive Error Handling
+
+### 6.1 Flow Error Handling for DB Corruption — Missing `.catch` Operator
+* **Issue**: The reactive `observe*()` methods in `MediaRepositoryImpl` use per-row `try/catch` (or `runCatching`) inside `.map {}` to handle domain mapping failures (e.g., invalid enum values from a corrupted row). However, this does NOT catch upstream database query exceptions such as `SQLiteDatabaseCorruptException`, which occurs when Room attempts to open or query a corrupt database file. These exceptions propagate through the Flow chain and crash the collector (the ViewModel/UI).
+* **Reason**: `SQLiteDatabaseCorruptException` is thrown by Room's internal query execution before the `.map {}` operator ever runs. The per-row try/catch is inside `.map {}` and only catches exceptions during row-to-domain conversion. Upstream FlowSource errors bypass it entirely.
+* **Fix**: Add the `.catch` operator **after** `flowOn(Dispatchers.Default)` to act as the final safety net for all upstream errors, emitting a safe fallback value instead of crashing:
+  ```kotlin
+  override fun observeAll(): Flow<List<MediaItem>> {
+      return dao.observeAll()
+          .map { entities ->
+              entities.mapNotNull { entity ->
+                  runCatching { entity.toDomain() }.getOrNull()
+              }
+          }
+          .distinctUntilChanged()
+          .flowOn(Dispatchers.Default)
+          .catch { e ->
+              Log.e("MediaRepository", "DB query failed (possible corruption)", e)
+              emit(emptyList())
+          }
+  }
+  ```
+   The `.catch` operator catches ALL exceptions upstream of it in the chain — both mapping failures (if `runCatching` were removed) AND database query failures.
+
+---
+
+## 7. Continued Audit — Additional Issues Found
+
+### 7.1 Package Name Contradiction
+* **Issue**: Section 2 declares `Package: app.lazydex` ("matches Mihon's `app.mihon` pattern"), and Section 3's project tree root is `app.lazydex/`. But **Appendix B's File Manifest** puts every source set under `kotlin/com/rockyxwall/lazydex/` (main, test, and androidTest). Two different, incompatible package names.
+* **Fix**: Standardize on `app.lazydex` and correct all three Appendix B paths from `kotlin/com/rockyxwall/lazydex/...` to `kotlin/app/lazydex/...`.
+
+### 7.2 Auto-Backup Feature Has No Dependency, No Class, No Wiring
+* **Issue**: Auto-backup (Core Feature #7, SettingsScreen "Backup" section, Phase 9 checklist "auto-backup schedule works") is described only as "Optional scheduled backup via WorkManager." But:
+  - `libs.versions.toml` has no `androidx-work`/`work-runtime-ktx` entry.
+  - No `AutoBackupWorker.kt` exists in the Section 3 architecture tree or Appendix B manifest.
+  - `di/Modules.kt` has no Worker/WorkManager registration.
+  - No enqueue policy (`KEEP`/`REPLACE`), constraints, or interval logic is specified.
+* **Fix**: Add `androidx-work-runtime-ktx` to the version catalog, create `backup/AutoBackupWorker.kt` (a `CoroutineWorker` that calls `repository.getAll()` → `BackupProcessor.serialize()` → writes to app-internal storage with a timestamped filename), register it via Koin's `WorkManagerFactory` (or a manual `WorkerFactory`), and add both files to the manifest.
+
+### 7.3 Stale Enum Value Comments in Architecture Tree
+* **Issue**: Section 3's tree comments say `MediaCategory.kt # NOVEL, ANIME, MANGA, GAME` (4 values) and `UserStatus.kt # READING, COMPLETED` (2 values). The actual Section 4.1 enums have 6 categories (adds MOVIE, TV) and 7 statuses.
+* **Fix**: Update the tree comments to list all values, or drop the inline value lists entirely so they can't drift out of sync with the canonical definition.
+
+### 7.4 Coil's Image Loader Has No SSRF Protection
+* **Issue**: `MetadataScraper` uses a custom `SafeDns` to block private/loopback/link-local addresses and rebinding (Section 4.5). But the Phase 3 Koin `ImageLoader` for Coil (`AsyncImage` cover images) is built with a plain OkHttp backend — no `SafeDns`. `coverImageUrl` validation (Section 4.7 AddItemScreen) only requires "valid URL (http/https)," with none of `sourceUrl`'s IP/scheme denylist rules. A user-entered or scraped `og:image` pointing at an internal address (e.g. a cloud metadata endpoint) will be fetched by Coil unguarded.
+* **Fix**: Build one shared `OkHttpClient` with `SafeDns` in the DI network module, inject it into both `MetadataScraper` and Coil's `OkHttpNetworkFetcherFactory(callFactory = { safeClient })`, and tighten `coverImageUrl` validation to match `sourceUrl`'s scheme rules.
+
+### 7.5 Duplicate/Shadowed `BackupEnvelopeDto`
+* **Issue**: Section 4.6 declares `private data class BackupEnvelopeDto` at file top level (lines 632-637), then declares **another** `private data class BackupEnvelopeDto` nested inside `object BackupProcessor` (lines 658-662) with the identical name. The nested one shadows the top-level one for `serialize()`/`deserialize()`, leaving the top-level declaration dead code and the "canonical" version ambiguous.
+* **Fix**: Delete the nested duplicate inside `BackupProcessor`; keep the single top-level `BackupEnvelopeDto`.
+
+### 7.6 `BackupProcessor.merge()` Has No Function Body — Won't Compile
+* **Issue**: Inside `object BackupProcessor` (a concrete object, not an interface/abstract class), `merge()` is declared as:
+  ```kotlin
+  suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem>
+  ```
+  with no `= ...` or `{ }` body (line 674). A concrete object cannot contain body-less function declarations — this is a hard compile error.
+* **Fix**: Implement it per the plan's own merge rules (local wins ties, pure-imports keep historical timestamps, LinkedHashMap for deterministic order):
+  ```kotlin
+  suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): List<MediaItem> =
+      withContext(Dispatchers.Default) {
+          val localById = local.associateBy { it.id }
+          val result = LinkedHashMap<String, MediaItem>()
+          local.forEach { result[it.id] = it }
+          imported.forEachIndexed { index, item ->
+              val existingLocal = localById[item.id]
+              when {
+                  existingLocal == null -> {
+                      val finalTime = if (item.lastUpdated > 0L) item.lastUpdated
+                                      else System.currentTimeMillis() - index
+                      result[item.id] = item.copy(lastUpdated = finalTime).normalize()
+                  }
+                  item.lastUpdated > existingLocal.lastUpdated -> result[item.id] = item.normalize()
+              }
+          }
+          result.values.toList()
+      }
+  ```
+
+### 7.7 `normalize()` Doesn't Enforce "Title Required"
+* **Issue**: Section 4.4 states validation rules ("Title is required") apply to both Add and Edit, and stresses "the repository does NOT trust that ViewModel data is already valid" — but that guarantee is only actually implemented for progress/total clamping. `normalize()` only trims the title (line 231); it never rejects or defaults a blank one. A user can clear the title on DetailScreen and save, and `update() → normalize()` will silently persist `title = ""`.
+* **Fix**: Either make `normalize()` fall back to a placeholder (e.g. `title.trim().ifBlank { "Untitled" }`), or have `DetailViewModel.saveChanges()` validate non-blank title client-side and surface an inline error before calling `repository.update()`, matching the pattern already used for duplicate-URL errors.
+
+### 7.8 DetailViewModel Has No Event Channel for External Deletion
+* **Issue**: The error-handling table (4.9) says "Navigation with deleted item → Catch in ViewModel, navigate back if item no longer exists," but `observeById(id)` transitioning to `null` is never wired to anything. HomeViewModel established a `Channel<HomeEvent>` pattern for one-shot navigation side effects (Section 4.7, Anti-Pattern #4); DetailViewModel has no equivalent.
+* **Fix**: Add `Channel<DetailEvent>` to DetailViewModel, emit `DetailEvent.ItemDeletedExternally` when the observed item flips non-null → null, and have DetailScreen collect it to call `popBackStack()`.
+
+### 7.9 AddItemViewModel Never Catches `DuplicateUrlException`
+* **Issue**: Add-flow duplicate protection relies solely on the pre-submit `existsByUrl()` check (4.7), which is a TOCTOU race — a duplicate can still slip through by the time `repository.add()` runs (e.g. rapid double-tap before the button disables). DetailViewModel got a `try/catch` for this exact exception (Fix 4.4); AddItemViewModel's save path was never given the same treatment, so the race would crash the coroutine instead of showing a friendly error.
+* **Fix**: Wrap `repository.add()` in AddItemViewModel with the same `catch (e: DuplicateUrlException)` pattern used in DetailViewModel.
+
+---
+
+## 8. Continued Audit — Additional Issues (Round 3)
+
+### 8.1 `notes` Field Silently Dropped by Backup Export/Import (Data Loss)
+* **Issue**: `MediaItem.notes` (4.1) and `MediaItemEntity.notes` both exist and are user-facing ("Notes field (optional)" in AddItemScreen, "Notes field (editable)" in DetailScreen). But `MediaItemBackupDto`, the JSON schema example, `MediaItem.toDto()`, and `MediaItemBackupDto.toDomain()` in 4.6 all omit `notes` entirely.
+* **Reason**: Every export silently discards the user's notes, and every import resets `notes` back to `""` (the domain model's default) regardless of what was on disk before. This is real, silent user data loss on the most basic Export→Import round trip — worse than the timestamp bug already caught in 2.3/7.6, since there's no fallback recovery at all.
+* **Fix**: Add `notes` to all four places:
+  ```kotlin
+  @Serializable
+  private data class MediaItemBackupDto(
+      // ...existing fields...
+      val notes: String? = null
+  )
+
+  private fun MediaItem.toDto() = MediaItemBackupDto(
+      // ...existing fields...
+      notes = notes
+  )
+
+  private fun MediaItemBackupDto.toDomain(): MediaItem? {
+      // ...
+      return MediaItem(
+          // ...existing fields...
+          notes = notes?.trim() ?: ""
+      ).normalize()
+  }
+  ```
+  Also add `"notes": "..."` to the documented JSON schema, and include a round-trip test that specifically asserts `notes` survives serialize→deserialize.
+
+### 8.2 Default Theme Contradicts Itself
+* **Issue**: Core Features #9 states **"Dark theme (default)"**. Section 4.8 states **"Dark mode follows system setting by default"**, and the `LazyDexTheme` signature backs the system-following claim: `darkTheme: Boolean = isSystemInDarkTheme()`. These describe two different first-launch behaviors — a user on a light-mode device gets light theme under 4.8's rule, but dark theme under Core Features' rule.
+* **Fix**: Pick one and make it explicit in code, not just prose. Recommended: introduce a persisted `ThemeMode { SYSTEM, LIGHT, DARK }` (DataStore/SharedPreferences-backed), initialize it to `DARK` on first launch (satisfying Core Features #9), and let "follow system" be an explicit option the user opts into via the toggle — rather than the unconfigured default.
+
+### 8.3 UserStatus/Category "Adaptive Label" Design Is Incoherent, and DetailScreen's Status Editor Is Missing 2 of 7 Values
+* **Issue**: Core Features #3 claims 5 conceptual statuses where "display label adapts to category," but 4.1's actual `UserStatus` enum hardcodes 7 separate values (READING, WATCHING, PLAYING as distinct entries, each with its own fixed `displayName` — nothing adapts). Worse, DetailScreen's spec (4.7) literally lists the status editor as **"dropdown/chips with all 5 statuses (Reading, Completed, On Hold, Dropped, Plan to)"** — omitting WATCHING and PLAYING outright. As written, an Anime or Game item can never be set to its correct in-progress status through the UI. Separately, the corrupted-import fallback in 4.6 (`userStatus` string doesn't match → default to `READING`) ignores category too, so a mangled Anime backup row silently becomes "Reading" instead of "Watching."
+* **Fix**: Add a category-aware helper and use it everywhere a status list or default is needed:
+  ```kotlin
+  fun inProgressStatusFor(category: MediaCategory): UserStatus = when (category) {
+      MediaCategory.NOVEL, MediaCategory.MANGA -> UserStatus.READING
+      MediaCategory.ANIME, MediaCategory.TV, MediaCategory.MOVIE -> UserStatus.WATCHING
+      MediaCategory.GAME -> UserStatus.PLAYING
+  }
+
+  fun availableStatuses(category: MediaCategory): List<UserStatus> = listOf(
+      inProgressStatusFor(category),
+      UserStatus.COMPLETED, UserStatus.ON_HOLD, UserStatus.DROPPED, UserStatus.PLAN_TO
+  )
+  ```
+  Use `availableStatuses(category)` to populate DetailScreen/AddItemScreen status chips (fixing the missing options), and use `inProgressStatusFor(category)` as the fallback in `MediaItemBackupDto.toDomain()` instead of the hardcoded `READING`.
+
+### 8.4 HomeScreen's Status Filter Chips Have No Backing Implementation
+* **Issue**: 4.7 describes "Secondary filter chips (optional): status filter — [All] [Reading] [Completed] [On Hold] [Dropped] [Plan to]." But `HomeUiState` has no `selectedStatus` field, `HomeEvent` has no `SelectStatus` case, and the DAO (4.3) only offers `observeByCategory` — there's no query or repository method that filters by status, or by category+status together.
+* **Fix**: Add a `selectedStatus: UserStatus?` to `HomeUiState`, a `SelectStatus` case to the input-action model, a DAO query (e.g. `observeByCategoryAndStatus`), and combine both filters in the ViewModel:
+  ```kotlin
+  combine(selectedCategoryFlow, selectedStatusFlow) { cat, status -> cat to status }
+      .flatMapLatest { (cat, status) -> repository.observeFiltered(cat, status) }
+  ```
+
+### 8.5 `HomeEvent` Conflates Inbound Actions and Outbound One-Shot Events
+* **Issue**: `HomeEvent` (4.7) is declared as one sealed interface containing both things the UI sends *to* the ViewModel (`Increment`, `Decrement`, `ToggleStatus`, `SelectCategory`, `DeleteItem`, `OpenDetail`) and the thing the ViewModel sends *out* to the UI via `Channel<HomeEvent>` — but the shown code only ever sends `OpenItem` through that channel. This contradicts the plan's own Anti-Pattern #4 guidance (one-shot events should be their own dedicated type) and leaves the other six variants as dead weight on the outbound `events: Flow<HomeEvent>` type.
+* **Fix**: Split into two types — `HomeAction` (inbound, handled via ViewModel methods or a single `onAction()`) and `HomeUiEvent` (outbound one-shot, containing only `OpenItem` and similar navigation/toast events), each with its own `Channel`.
+
+### 8.6 10MB Backup Ceiling Leaves No Headroom Over the Plan's Own Size Estimate
+* **Issue**: 4.6's Deserialization Rules reject any backup file over 10MB. But Edge Case #8 in 4.10 already estimates a 10,000-item library produces a "~5-10MB" backup — before notes text is even counted (see 8.1). A real power user's own valid export, once notes are correctly included per the 8.1 fix, can easily exceed the reject threshold, making their own backup unimportable back into the same app.
+* **Fix**: Raise the ceiling well past the estimated normal case (e.g. 50–100MB — it's plain JSON, no compression) or size the limit relative to available device storage rather than a fixed constant.
+
+### 8.7 Auto-Backup Has No Retention Policy or Restore Path
+* **Issue**: Even with the `AutoBackupWorker` added per Fix 7.2, nothing caps how many timestamped backup files accumulate in app-internal storage over time — daily backups run forever with no cleanup. Settings also only wires manual SAF import; there's no UI to browse or restore from an auto-backup file, so the feature can write backups but never read them back.
+* **Fix**: Have the Worker delete files beyond a retention window (e.g. keep last 30) at the end of each run, and add a "Restore from auto-backup" list in Settings that feeds a selected file through the existing `BackupManager.import()` + merge/overwrite flow.
+
+---
+
+## 9. Continued Audit — Additional Issues (Round 4)
+
+### 9.1 Scraper Size-Limit Technique Is Broken, Contradicts Its Own Code Sample, and Uses an Undeclared Dependency
+* **Issue**: Section 4.5's prose mandates: *"Always enforce a hard byte limit at the Okio source level via `body.source().peek().readByteString(5 * 1024 * 1024)`."* But `Okio`'s `readByteString(byteCount)` reads **exactly** `byteCount` bytes and throws `EOFException` if the source has fewer — it is not a "read up to N bytes, then stop" cap. As written, this would throw on nearly every real HTML page (almost all are well under 5MB), breaking scraping entirely rather than protecting against oversized ones.
+* Separately, the actual code sample in the same section abandons this technique and instead wraps `body.byteStream()` in `BoundedInputStream(...)` — a class from `org.apache.commons:commons-io`, which is **not present anywhere** in `libs.versions.toml`. The code also references `MAX_SCRAPE_BYTES`, which is never defined. So the plan proposes two different, mutually exclusive size-limiting mechanisms, and the one actually used in code won't compile.
+* **Fix**: Pick one real mechanism and use it consistently. Recommended: a small `ForwardingSource` that counts bytes read and throws once a limit is exceeded, fed to Jsoup via an `InputStream` bridge — no extra dependency needed:
+  ```kotlin
+  private const val MAX_SCRAPE_BYTES = 5L * 1024 * 1024
+
+  class SizeLimitedSource(delegate: Source, private val maxBytes: Long) : ForwardingSource(delegate) {
+      private var totalRead = 0L
+      override fun read(sink: Buffer, byteCount: Long): Long {
+          val result = super.read(sink, byteCount)
+          if (result != -1L) {
+              totalRead += result
+              if (totalRead > maxBytes) throw IOException("Response exceeded $maxBytes bytes")
+          }
+          return result
+      }
+  }
+  // usage: Jsoup.parse(SizeLimitedSource(body.source(), MAX_SCRAPE_BYTES).buffer().inputStream(), "UTF-8", url)
+  ```
+  Drop the `BoundedInputStream` reference and the `peek().readByteString()` line entirely.
+
+### 9.2 Auto-Backup Worker Will Crash: WorkManager's Default Init Races Koin Startup
+* **Issue**: Fix 7.2 adds `AutoBackupWorker` (a `CoroutineWorker`) that needs the Koin-provided `MediaRepository`/`BackupProcessor`. By default, Android's `WorkManagerInitializer` (an `androidx.startup` `ContentProvider`) runs **before** `Application.onCreate()`. If `LazyDexApp.onCreate()` is where `startKoin()` runs, WorkManager may construct `AutoBackupWorker` via reflection before Koin has any modules loaded, throwing `ClosedScopeException` / `NoBeanDefFoundException` the first time the worker fires.
+* **Reason**: This is unaddressed in Fix 7.2, which only specifies "register it via Koin's WorkManagerFactory" without sequencing.
+* **Fix**: Disable default WorkManager auto-init and initialize it manually after Koin, via a custom `WorkerFactory`:
+  ```xml
+  <!-- AndroidManifest.xml -->
+  <provider android:name="androidx.startup.InitializationProvider" android:authorities="${applicationId}.androidx-startup" tools:node="merge">
+      <meta-data android:name="androidx.work.WorkManagerInitializer" android:value="androidx.startup" tools:node="remove" />
+  </provider>
+  ```
+  ```kotlin
+  class LazyDexApp : Application(), SingletonImageLoader.Factory, Configuration.Provider {
+      override fun onCreate() {
+          super.onCreate()
+          startKoin { androidContext(this@LazyDexApp); modules(appModules) }
+          WorkManager.initialize(this, workManagerConfiguration)
+      }
+      override val workManagerConfiguration: Configuration
+          get() = Configuration.Builder().setWorkerFactory(get<KoinWorkerFactory>()).build()
+  }
+  ```
+
+### 9.3 Category Change on an Existing Item Doesn't Reconcile an Incompatible `userStatus`
+* **Issue**: Fix 8.3 correctly scopes `availableStatuses(category)` per category (e.g. Anime → WATCHING, not READING). But DetailScreen (4.7) allows editing category on an *existing* item. If a user changes an item's category from Anime (status = WATCHING) to Novel, WATCHING is no longer in `availableStatuses(NOVEL)`, leaving the item in a state the UI itself says shouldn't exist — and neither the original plan nor Fix 8.3 defines what happens to the stored status.
+* **Fix**: On category change in `DetailViewModel`, remap only the three "in-progress" values (READING/WATCHING/PLAYING) to the new category's equivalent; leave COMPLETED/ON_HOLD/DROPPED/PLAN_TO untouched since they aren't category-specific:
+  ```kotlin
+  fun onCategoryChanged(newCategory: MediaCategory) {
+      val inProgress = setOf(UserStatus.READING, UserStatus.WATCHING, UserStatus.PLAYING)
+      val newStatus = if (currentStatus in inProgress) inProgressStatusFor(newCategory) else currentStatus
+      // update UI state with newCategory + newStatus
+  }
+  ```
+
+### 9.4 ViewModel Error State Uses Raw Hardcoded Strings, Violating Anti-Pattern #6
+* **Issue**: Fixes 4.4 and 7.9 have `DetailViewModel`/`AddItemViewModel` set `_errorMessage.value = "This URL is already tracked by another item."` — a literal English string in a `StateFlow`. Anti-Pattern #6 requires all user-facing strings in `strings.xml` via `stringResource()`, but `stringResource()` only works inside `@Composable` scope, and Architectural Rule #2 forbids Context in ViewModels. As written, the fixes satisfy neither rule.
+* **Fix**: Have the ViewModel expose a resource ID (or sealed `UiText` type), resolved to text only at the Composable layer:
+  ```kotlin
+  sealed interface UiText {
+      data class Resource(@StringRes val resId: Int) : UiText
+      @Composable fun resolve(): String = when (this) {
+          is Resource -> stringResource(resId)
+      }
+  }
+  // ViewModel: _errorMessage.value = UiText.Resource(R.string.error_duplicate_url)
+  // Screen: errorMessage?.resolve()?.let { Text(it) }
+  ```
+
+### 9.5 Temp Backup File Name Collision Between Manual Export and Auto-Backup Worker
+* **Issue**: Section 4.6's Export Rules write a fixed-name temp file, `File(context.cacheDir, "temp_backup.json")`, before copying to the SAF target. Fix 7.2's `AutoBackupWorker` runs on a WorkManager schedule and independently serializes+writes backups. If a scheduled auto-backup fires while the user is mid-export in Settings, both paths can write to the same `cacheDir` filename concurrently, corrupting one or both temp files.
+* **Fix**: Use a unique temp filename per operation (e.g. `UUID.randomUUID()` or a caller-scoped subdirectory), not a shared constant:
+  ```kotlin
+  val tempFile = File(context.cacheDir, "backup_${UUID.randomUUID()}.json.tmp")
+  ```
+
+### 9.6 `BackupManager` / `BackupProcessor` Signatures Contradict Their Own Described Flow
+* **Issue**: Section 4.6 declares:
+  ```kotlin
+  suspend fun export(context: Context, uri: Uri, items: List<MediaItem>)
+  suspend fun import(context: Context, uri: Uri): List<MediaItem>
+  ```
+  i.e., `BackupManager` takes/returns domain objects directly. But the SettingsScreen flow (4.9) describes them as separate steps from serialization: *"ViewModel calls `repository.getAll()` + `BackupProcessor.serialize()` + `BackupManager.export()`"* and *"`BackupManager.import()` + `BackupProcessor.deserialize()`"* — implying `BackupManager` handles only raw JSON I/O and `BackupProcessor` handles the `List<MediaItem> ⇄ String` conversion, which only works if `export()` takes a `String` and `import()` returns a `String`. The declared signatures and the narrated call sequence can't both be correct.
+* **Fix**: Make `BackupManager` a pure file-I/O layer over SAF, operating on `String`, matching the flow description:
+  ```kotlin
+  object BackupManager {
+      suspend fun export(context: Context, uri: Uri, json: String)
+      suspend fun import(context: Context, uri: Uri): String
+  }
+  // SettingsViewModel:
+  BackupManager.export(context, uri, BackupProcessor.serialize(repository.getAll()))
+  val items = BackupProcessor.deserialize(BackupManager.import(context, uri))
+  ```
+
+---
+
+## 10. Core Architectural & Runtime Fatal Flaws (Round 5)
+
+### 10.1 The "Single Source of Truth" Invariant Contradiction
+
+* **Issue**: Section 3 (Rule 7) and Section 4.4 explicitly mandate: *"Every write path goes through `MediaItem.normalize()` before persisting... CANNOT be bypassed by any caller."* However, Section 4.3 and 4.10 (#1) mandate that `incrementProgress` and `decrementProgress` use **atomic raw SQL updates** (`UPDATE media_items SET currentProgress = MIN(...)`). The checklist at line 262 even says `normalize()` must run on *"increment, decrement, setStatus"*.
+* **Reason**: A raw SQL update directly manipulates the SQLite database, entirely bypassing the Kotlin domain layer and `MediaItem.normalize()`. The plan claims that "SQL handles capping," but if a new invariant is added to `normalize()` in the future (e.g., "if progress equals total, set status to COMPLETED"), the atomic SQL will silently violate it because the SQL query wasn't updated. The checklist and the implementation contract are mutually exclusive.
+* **Fix**: You cannot have both without an exception. You must formally amend Architectural Rule 7:
+> *"Rule 7: Whole-item writes (add, update, replaceAll) MUST go through `MediaItem.normalize()`. Atomic partial updates (increment, decrement, setStatus) are strictly exempt from `normalize()`, provided their raw SQL queries directly mirror the bound-clamping logic of the domain model."*
+
+### 10.2 The OOM (Out of Memory) Trap in Backup Export
+
+* **Issue**: Fix 8.6 raised the backup size ceiling to 50–100MB to accommodate power users. Fix 9.6 redefined `BackupManager` to pass the entire backup file as a single String: `suspend fun export(context: Context, uri: Uri, json: String)`.
+* **Reason**: Loading a 50MB JSON payload into a Kotlin `String` requires 100MB of heap (due to UTF-16 character encoding). Combined with the ~100MB memory footprint of the `List<MediaItem>` domain objects and the serialization buffer, this single operation will spike the app's heap usage to 200MB+. On low/mid-tier Android devices, this will instantly trigger an `OutOfMemoryError` and crash the app during export/import.
+* **Fix**: Completely eliminate the intermediate `String`. `BackupProcessor` and `BackupManager` must operate directly on streams using `kotlinx.serialization`'s streaming API (requires `@OptIn(ExperimentalSerializationApi::class)`). This also eliminates the temp-file approach from Export Rules since streaming cannot leave partial files:
+```kotlin
+object BackupManager {
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun export(context: Context, uri: Uri, items: List<MediaItem>) = withContext(Dispatchers.IO) {
+        context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+            val envelope = BackupEnvelopeDto(items = items.map { it.toDto() })
+            Json.encodeToStream(envelope, output)
+        } ?: throw IOException("Could not open output stream for $uri")
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun import(context: Context, uri: Uri): List<MediaItem> = withContext(Dispatchers.IO) {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            Json.decodeFromStream<BackupEnvelopeDto>(input).items?.mapNotNull { it.toDomain() } ?: emptyList()
+        } ?: emptyList()
+    }
+}
+```
+
+### 10.3 Coroutine Cancellation Swallowed by Scraper
+
+* **Issue**: In `MetadataScraper.scrape()` (Section 4.5 code sample, line 622), the network call is wrapped in a generic try/catch:
+```kotlin
+catch (e: Exception) { Result.failure(e) }
+```
+* **Reason**: In Kotlin coroutines, cancellation is communicated by throwing a `CancellationException` (which extends `RuntimeException` extends `Exception`). If the user dismisses the AddItem bottom sheet while the OkHttp request is hanging, `viewModelScope` cancels the coroutine. The generic `catch (e: Exception)` intercepts the `CancellationException`, swallows the cancellation, and incorrectly returns a `Result.failure()` to the ViewModel, breaking structured concurrency and potentially causing the ViewModel to process a failure state for a destroyed screen.
+* **Fix**: You must explicitly rethrow `CancellationException` before the generic catch:
+```kotlin
+} catch (e: CancellationException) {
+    throw e // Crucial: allow coroutine to cancel
+} catch (e: Exception) {
+    Result.failure(e)
+}
+```
+
+### 10.4 I/O Threading Hallucination in Jsoup
+
+* **Issue**: Section 4.5 mandates: *"Jsoup.parse() is CPU-bound and MUST run on Dispatchers.Default, NOT on OkHttp's IO dispatcher pool."* The code passes an `InputStream` (via the `SizeLimitedSource` stream from Fix 9.1) directly to `Jsoup.parse(InputStream, ...)`.
+* **Reason**: This is factually incorrect for the implemented code. When Jsoup parses from a stream, it performs **blocking I/O reads** from the OkHttp socket as it builds the DOM tree — the network content has not been fully buffered into memory. Running blocking socket I/O on `Dispatchers.Default` (which has a thread count equal to CPU cores, often just 2-8 threads) will immediately starve the thread pool if the network is slow, since every blocked thread consumes a core-limited slot.
+* **Fix**: Remove the `withContext(Dispatchers.Default)` wrapper around `Jsoup.parse`. The entire read-and-parse operation from the `InputStream` MUST remain on `Dispatchers.IO`:
+```kotlin
+// Inside withContext(Dispatchers.IO) { ... }:
+val doc = Jsoup.parse(limitStream, "UTF-8", url) // No Dispatchers.Default switch
+val title = extractTitle(doc)
+val imageUrl = extractImageUrl(doc)
+```
+
+### 10.5 Missing DataStore Dependency for Theme Persistence
+
+* **Issue**: Fix 8.2 resolved a theme default contradiction by mandating a persisted `ThemeMode` backed by "DataStore/SharedPreferences". However, `androidx.datastore:datastore-preferences` is completely absent from the `libs.versions.toml` in Section 6. Neither DataStore nor SharedPreferences is listed anywhere in the dependency catalog.
+* **Reason**: A feature was dictated by the fix but the required build dependency was ignored, resulting in missing imports when the project is scaffolded.
+* **Fix**: Add the DataStore dependency to `libs.versions.toml` and register a `ThemePreferences` singleton in `di/Modules.kt`:
+```toml
+[versions]
+datastore = "1.1.1"
+
+[libraries]
+datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+```
+
+### 10.6 AddItemScreen Category/Status Desync
+
+* **Issue**: Fix 8.3 instituted strict rules for statuses based on category (e.g., Anime → WATCHING, Game → PLAYING). However, Section 4.7's `AddItemScreen` spec (lines 874–891) lists the form fields as URL, Category, Title, Cover URL, Progress, Total, Notes — **no Status selector**. If a user adds an Anime via URL auto-fill and hits Save, the ViewModel has no source for the item's status. Without a defined default, the item would get `READING` (the domain model default), violating the category-status mapping established in Fix 8.3.
+* **Reason**: The AddItem flow was never updated to respect the new category-aware status constraints introduced by Fix 8.3.
+* **Fix**: AddItemViewModel must dynamically derive and assign the correct initial status based on the selected category when creating a new item, and AddItemScreen should show the auto-derived status as a read-only label to keep the form simple:
+```kotlin
+// In AddItemViewModel:
+val initialStatus = inProgressStatusFor(selectedCategory)
+val newItem = MediaItem(
+    category = selectedCategory,
+    userStatus = initialStatus,
+    // ... other fields
+)
+```
+
+### 10.7 Target SDK 34 Edge-to-Edge System UI Overlap
+
+* **Issue**: The plan sets `Target SDK 34` and uses Jetpack Compose Material 3 but never mentions `enableEdgeToEdge()`, `WindowInsets`, or `Modifier.windowInsetsPadding()` anywhere.
+* **Reason**: On API 35+ (which the plan's stated target SDK 34 inherits behavior changes from), edge-to-edge rendering is enforced by default. Without handling insets, the `LazyColumn` items will draw underneath the transparent navigation bar, and the `ModalBottomSheet`'s save button in AddItemScreen will overlap with the gesture navigation handle.
+* **Fix**:
+1. Call `enableEdgeToEdge()` in `MainActivity.onCreate()` before `setContent {}`.
+2. Ensure `HomeScreen` and `DetailScreen` use Material 3 `Scaffold` (which automatically consumes insets for content area).
+3. Explicitly apply `Modifier.windowInsetsPadding(WindowInsets.navigationBars)` to content inside `ModalBottomSheet` in AddItemScreen.
+
+### 10.8 DetailScreen Progress Clamping UI Illusion
+
+* **Issue**: Section 4.7 states: *"DetailScreen: Client-side clamp progress on blur (cap to total), show inline hint ('Capped to 100')."* The plan relies on focus-loss (blur) to trigger the clamp and warning.
+* **Reason**: Compose TextFields do not natively trigger "on blur" events without custom `FocusManager` handling. If a user types "150" (where total is 100) and taps the "Save" button in the toolbar *without dismissing the keyboard*, the field never loses focus. The ViewModel receives "150", `normalize()` silently caps it to "100" in Room, and the user never sees the UI warning — they see their entered "150" briefly before the save refreshes with "100" and no explanation.
+* **Fix**: The client-side clamping and warning feedback must also be evaluated explicitly during the `saveChanges()` event in `DetailViewModel`, not just relying on UI focus-loss. If the ViewModel detects a clamp was required during save, it can proceed with the save but should emit a toast or snackbar event:
+```kotlin
+fun saveChanges(updatedItem: MediaItem) {
+    val clamped = updatedItem.currentProgress > (updatedItem.totalItems ?: Int.MAX_VALUE)
+    val normalized = updatedItem.copy(lastUpdated = System.currentTimeMillis()).normalize()
+    viewModelScope.launch {
+        repository.update(normalized)
+        if (clamped) _events.send(SaveEvent.ProgressCapped)
+    }
+}
+```
+
+---
+
+## 11. Continued Audit — Additional Issues (Round 6)
+
+### 11.1 The "Teleporting Item" UX Disaster (List Sorting vs. Rapid Tapping)
+
+* **Location**: Section 4.3 (DAO `ORDER BY lastUpdated DESC`) & Section 4.7 (HomeScreen Interactions)
+* **Issue**: The DAO mandates sorting the Home list by `lastUpdated DESC`. When a user taps the `[+]` button to increment progress, the atomic SQL updates `lastUpdated` to the current timestamp. Room immediately invalidates the table, the Flow emits the new list, and the item instantly teleports to the top (index 0) of the list. If the user is rapidly tapping `[+]` three times, the first tap moves the item, and their second and third taps will accidentally hit *whatever item slid into its place*. This renders inline progress tracking unusable.
+* **Fix**: Separate creation time from modification time to stabilize the UI:
+  1. Add `val dateAdded: Long` to `MediaItem` and `MediaItemEntity` (defaulting to `System.currentTimeMillis()` on creation).
+  2. Change the DAO queries to `ORDER BY dateAdded DESC` (or `title ASC`).
+  3. Keep `lastUpdated` strictly for background conflict resolution in `BackupProcessor.merge()`.
+
+### 11.2 TextField Clobbering on the Detail Screen
+
+* **Location**: Section 4.7 (DetailScreen Inline Editing) & Fix 4.2
+* **Issue**: The plan states the DetailScreen allows inline editing with a "Save" button, and Fix 4.2 binds the screen to `repository.observeById(id)`. If the screen's TextFields are bound to this reactive DB Flow, any background DB invalidation (or even a delayed first emission) will instantly overwrite the user's uncommitted typing with the stale database state.
+* **Fix**: `DetailViewModel` must read the database state exactly *once* (e.g., `repository.observeById(id).take(1)`) to initialize an independent `MutableStateFlow<MediaItem>` (the draft state). The UI binds to the draft state, and only writes back to Room when the user clicks Save.
+
+### 11.3 The `exportSchema = false` Trap (Migration Dead-End)
+
+* **Location**: Section 4.2 (Room Database)
+* **Issue**: The plan explicitly mandates `exportSchema = false` for v1.0 because "there are zero migrations." Room's `AutoMigration` feature requires the schema JSON of the *previous* version to generate the migration path. If v1.0 ships to production with `exportSchema = false`, you will permanently lack the v1.0 baseline. When you eventually build v2.0, AutoMigration will fail, forcing you to write raw, manual SQL migrations for every database change for the rest of the app's lifecycle.
+* **Fix**: Change `exportSchema = true` immediately. Configure `room.schemaLocation` in the `app/build.gradle.kts` file so the v1.0 schema is tracked in version control from day one.
+
+### 11.4 Empty Backup Import Wipes Database Silently
+
+* **Location**: Section 4.3 (DAO `replaceAll`), Section 4.6 (Deserialization)
+* **Issue**: If a user accidentally imports an empty backup file, or a malformed file that safely falls back to `[]` per the deserialization rules, the `SettingsViewModel` passes the empty list to `repository.replaceAll()`. The `@Transaction` executes `deleteAll()` (wiping the entire local database) followed by `upsertAll(emptyList)` (doing nothing). The user's entire library is instantly deleted with no warning.
+* **Fix**: Add a hard guard in `BackupProcessor.deserialize()` or `SettingsViewModel` that throws an exception if the parsed list is empty:
+```kotlin
+val items = envelope.items?.mapNotNull { it.toDomain() } ?: emptyList()
+if (items.isEmpty()) throw ImportFailedException("Backup file contains no valid items.")
+return items
+```
+
+### 11.5 Merge Logic Blind Spot: `sourceUrl` Collisions
+
+* **Location**: Section 4.6 (Merge Logic), Fix 7.6
+* **Issue**: Fix 7.6 implements merge logic deduplicating *exclusively* by `id` (UUID). Scenario: A user uninstalls the app, reinstalls it, and manually re-adds a novel they are reading (generating ID = A, URL = "https://x"). Later, they import an old backup containing that same novel (ID = B, URL = "https://x"). The merge function sees different IDs and includes *both* in the final list. When passed to `dao.replaceAll()`, the `sourceUrl` UNIQUE index is violated, throwing a `SQLiteConstraintException` and crashing the entire import.
+* **Fix**: `BackupProcessor.merge()` must deduplicate by BOTH `id` and normalized `sourceUrl`. If an imported item has a matching URL but a different ID compared to a local item, they must be merged into a single entity (preserving the local `id` to maintain DB integrity).
+
+### 11.6 Scraper Blindly Downloads Binary Files (OOM/CPU Waste)
+
+* **Location**: Section 4.5 (Metadata Scraper), Fix 9.1
+* **Issue**: Fix 9.1 limits the download size to 5MB, but never checks the `Content-Type`. If a user pastes a URL to a 4MB `.zip`, `.mp4`, or `.png` file, OkHttp will fully download the binary payload and pass it to `Jsoup.parse()`. Jsoup will attempt to parse 4MB of raw binary data as UTF-8 HTML strings, resulting in gibberish, wasted bandwidth, and a massive CPU spike.
+* **Fix**: In `MetadataScraper`, immediately after checking `!response.isSuccessful`, verify the content type before reading the body stream:
+```kotlin
+val contentType = response.body?.contentType()
+if (contentType?.subtype != "html") {
+    throw IOException("URL does not point to an HTML page")
+}
+```
+
+### 11.7 Navigation 2.8 Type-Safety Paradigm Mismatch
+
+* **Location**: Section 4.7 (DetailScreen Route Argument)
+* **Issue**: The plan states the ViewModel should extract the route argument via `SavedStateHandle.getStateFlow<String>("id", "")`. In Navigation Compose 2.8 (which introduced the `@Serializable` type-safe routes specified in the tech stack), route arguments are obfuscated in the bundle and must be decoded through the serialization engine. Using raw string keys to dig into the `SavedStateHandle` circumvents the type-safe routing and will fail to resolve the argument.
+* **Fix**: Use the official Nav 2.8 extraction API in `DetailViewModel`:
+```kotlin
+val route = savedStateHandle.toRoute<DetailRoute>()
+val itemId = route.id
+```
+
+### 11.8 Dynamic Color Overrides AMOLED Mode
+
+* **Location**: Section 4.8 (Theme)
+* **Issue**: The plan mandates supporting both `dynamicColor` (Material You) and `amoledMode` (True Black backgrounds). However, `dynamicDarkColorScheme(context)` returns an immutable, OS-generated palette (which uses dark grays, not pure black). If `amoledMode` is enabled, the plan provides no instruction to override the OS dynamic colors, resulting in the AMOLED setting being silently ignored on Android 12+ devices.
+* **Fix**: In `Theme.kt`, explicitly copy and mutate the background/surface colors *after* retrieving the base scheme:
+```kotlin
+val baseColor = if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+} else {
+    if (darkTheme) DarkColorScheme else LightColorScheme
+}
+
+val finalColorScheme = if (darkTheme && amoledMode) {
+    baseColor.copy(background = Color.Black, surface = Color.Black)
+} else {
+    baseColor
+}
+```
+
+---
+
+## 12. Continued Audit — Critical Issues & Regressions (Round 7)
+
+### 12.1 Backup Export Permanently Leaks Temp Files on Failure
+
+* **Location**: Section 4.6 (Export Rules), Fix 9.5
+* **Issue**: Fix 9.5 mandates creating unique temp files for exports: `val tempFile = File(context.cacheDir, "backup_${UUID.randomUUID()}.json.tmp")`. However, it relies on the success path ("Delete the temporary file after successful transfer") to clean it up. If the SAF output stream fails, if `Json.encodeToStream` throws an exception, or if the coroutine is cancelled, the temp file is orphaned. At 5MB–100MB per file, failed exports will rapidly exhaust device storage until the OS intervenes.
+* **Fix**: The temp file write must be wrapped in a `try/finally` block to guarantee deletion regardless of exceptions or coroutine cancellation:
+```kotlin
+val tempFile = File(context.cacheDir, "backup_${UUID.randomUUID()}.json.tmp")
+try {
+    // Write to tempFile, copy to SAF uri...
+} finally {
+    if (tempFile.exists()) tempFile.delete()
+}
+```
+*(Note: If Fix 10.2's streaming API entirely bypasses the temp file by writing directly to the `contentResolver` output stream, the temp file steps must be formally stricken from the plan).*
+
+### 12.2 Missing `dateAdded` in Backup Schema Destroys List Order on Import
+
+* **Location**: Fix 11.1, Section 4.6 (Backup System)
+* **Issue**: Fix 11.1 solved the "Teleporting Item" UI bug by separating modification time (`lastUpdated`) from creation time (`dateAdded`), and changed the DAO to `ORDER BY dateAdded DESC`. However, `dateAdded` was **never added to `MediaItemBackupDto`**.
+* **Reason**: When a user exports their library, `dateAdded` is silently dropped. When they import it back, the domain mapping fallback will assign `System.currentTimeMillis()` as the `dateAdded` for *every* item. The user's entire historical sorting order is permanently destroyed on import.
+* **Fix**: Add `dateAdded` to `MediaItemBackupDto`, `toDto()`, and `toDomain()`:
+```kotlin
+@Serializable
+private data class MediaItemBackupDto(
+    // ...
+    val dateAdded: Long? = null
+)
+// In toDomain():
+val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else System.currentTimeMillis()
+```
+
+### 12.3 Status Filter Chips Are Completely Broken for Anime and Games
+
+* **Location**: Section 4.7 (HomeScreen), Fix 8.3, Fix 8.4
+* **Issue**: The UI spec dictates a "Reading" filter chip to show in-progress items. Fix 8.3 correctly split the underlying domain status into `READING` (Novels), `WATCHING` (Anime), and `PLAYING` (Games). If Fix 8.4's DAO query blindly filters by `userStatus = :status` using the UI's selected chip (e.g., `UserStatus.READING`), **Anime and Games will instantly vanish** from the list because their statuses are `WATCHING` and `PLAYING`.
+* **Fix**: The UI filter state must not map 1:1 to a single enum value. Create a conceptual `StatusFilter` enum for the UI, and map it to a SQL `IN (...)` clause in the DAO:
+```kotlin
+// UI Layer
+enum class StatusFilter { ALL, IN_PROGRESS, COMPLETED, ON_HOLD, DROPPED, PLAN_TO }
+
+// DAO
+@Query("""
+    SELECT * FROM media_items 
+    WHERE (:category IS NULL OR category = :category)
+    AND (
+        :filterType = 'ALL' OR 
+        (:filterType = 'IN_PROGRESS' AND userStatus IN ('READING', 'WATCHING', 'PLAYING')) OR
+        (:filterType = 'EXACT' AND userStatus = :exactStatus)
+    )
+    ORDER BY dateAdded DESC
+""")
+fun observeFiltered(category: String?, filterType: String, exactStatus: String?): Flow<List<MediaItemEntity>>
+```
+
+### 12.4 OkHttp Coroutine Cancellation Is Swallowed, Falsely Triggering UI Errors
+
+* **Location**: Section 4.5 (Metadata Scraper), Fix 10.3
+* **Issue**: The scraper wraps the network call with `currentCoroutineContext()[Job]?.invokeOnCompletion { call.cancel() }`. When the coroutine is cancelled (e.g., user closes the bottom sheet), OkHttp interrupts the socket and `call.execute()` throws an `IOException` (e.g., "Socket closed" or "Canceled").
+* **Reason**: Fix 10.3 added `catch (e: CancellationException) { throw e }`, but **OkHttp does not throw `CancellationException`**. It throws `IOException`. The outer block catches the `IOException` and returns `Result.failure(e)`. The ViewModel receives a failure instead of a cancellation, triggering error states (toasts/snackbars) for a screen the user already closed.
+* **Fix**: Explicitly check coroutine status or the specific OkHttp cancellation exception before returning a failure:
+```kotlin
+} catch (e: Exception) {
+    if (e is IOException && e.message == "Canceled" || !currentCoroutineContext().isActive) {
+        throw CancellationException("Scrape cancelled", e)
+    }
+    Result.failure(e)
+}
+```
+
+### 12.5 `sourceUrl` Merge Deduplication ID-Swap Crashes the Database
+
+* **Location**: Fix 11.5, Section 4.6 (Merge Logic)
+* **Issue**: Fix 11.5 mandates deduplicating imports by BOTH `id` and `sourceUrl`. If an imported item has the same URL as a local item but a *different ID*, the plan says to "merge into a single entity (preserving the local id)". However, if the imported item is newer and "wins", simply taking the imported item and mapping its ID to the local ID leaves the *original* imported ID unaccounted for. If the JSON contained *other* items that somehow referenced it, or if it isn't properly removed from the imported pool, Room's `upsertAll` will crash with a `SQLiteConstraintException` because two items in the merged list still share the same `sourceUrl`.
+* **Fix**: The merge logic must aggressively group by normalized URL *first*, reconcile conflicts to a single winning domain model, and explicitly force the winning model to adopt the local database's `id`:
+```kotlin
+// Inside BackupProcessor.merge:
+val localByUrl = local.associateBy { it.sourceUrl }
+// ... loop over imported ...
+val url = item.sourceUrl
+if (url != null && localByUrl.containsKey(url)) {
+    val localMatch = localByUrl[url]!!
+    val winner = if (item.lastUpdated > localMatch.lastUpdated) item else localMatch
+    // CRITICAL: Force the local ID to prevent UNIQUE constraint crashes
+    result[localMatch.id] = winner.copy(id = localMatch.id).normalize()
+}
+```
+
+### 12.6 Scraper Content-Type Check Crashes on Valid XHTML and Null Headers
+
+* **Location**: Fix 11.6
+* **Issue**: Fix 11.6 added `if (contentType?.subtype != "html") throw IOException(...)` to prevent downloading binary files.
+* **Reason**:
+  1. `contentType` can be null (servers omit it). If null, `null != "html"` evaluates to `true`, and the scraper crashes on a perfectly valid webpage.
+  2. Many modern/legacy novel sites serve `application/xhtml+xml`. The subtype is `xhtml+xml`. `xhtml+xml != html` evaluates to `true`, rejecting valid text content.
+* **Fix**: Make the check permissive for HTML/XML and handle nulls safely:
+```kotlin
+val subtype = response.body?.contentType()?.subtype ?: "html" // Assume HTML if missing
+if (!subtype.contains("html") && !subtype.contains("xml")) {
+    throw IOException("URL does not point to an HTML page (got $subtype)")
+}
+```
+
+### 12.7 Scraper Vulnerable to "Slowloris" Hanging
+
+* **Location**: Section 4.5 (Metadata Scraper), Section 6 (OkHttp config)
+* **Issue**: The plan configures OkHttp with a `readTimeout` of 15 seconds. `readTimeout` only measures the maximum time *between* bytes arriving. If a malicious or tarpitted site returns 1 byte every 14 seconds, OkHttp will never time out. A 5MB file could take 20 hours to download, permanently hanging the coroutine and leaking memory.
+* **Fix**: Enforce an absolute wall-clock timeout on the entire scrape operation using Kotlin Coroutines:
+```kotlin
+suspend fun scrape(url: String): Result<ScrapedMetadata> = withTimeout(30_000L) {
+    withContext(Dispatchers.IO) {
+        // OkHttp logic here...
+    }
+}
+```
+
+### 12.8 AddItemScreen Form State Hoisting Contradiction (Split-Brain UI)
+
+* **Location**: Section 4.7 (AddItemScreen flow)
+* **Issue**: The plan states that the UI survives rotation using `rememberSaveable` for form state. Simultaneously, it states the ViewModel completes the async scrape and "auto-fills Title and Cover URL fields."
+* **Reason**: If the TextFields are backed by local `rememberSaveable` state in the Compose function, the ViewModel cannot inject the scraped data into them without convoluted side-effects (`LaunchedEffect`). This creates a split-brain architecture where the ViewModel holds scrape results but the UI holds user input.
+* **Fix**: The ViewModel MUST fully hoist the form state. Delete `rememberSaveable` from the UI. The ViewModel exposes a `MutableStateFlow<AddItemFormState>`, and the TextFields read/write directly to it. When the scrape succeeds, the ViewModel procedurally updates the Flow, instantly reflecting in the UI.
+
+### 12.9 SSRF/URI Validation Bypass in the Domain Model
+
+* **Location**: Section 4.1 (MediaItem), Section 4.4 (UrlNormalizer)
+* **Issue**: `UrlNormalizer` is wrapped in a `try/catch` that falls back to `url.trim()` if URI parsing fails. `MediaItem.normalize()` trusts this output completely. Furthermore, `coverImageUrl` has NO scheme validation at the domain level.
+* **Reason**: If a malicious backup JSON or an edge-case UI bug injects `sourceUrl = "javascript:alert(1)"` or `coverImageUrl = "file:///data/data/app.lazydex/databases/lazydex_db"`, the normalizer simply trims it, the repository saves it, and Coil attempts to execute/read it. The plan explicitly stated `normalize()` is the "canonical invariant enforcer", but it fails to enforce basic URL safety.
+* **Fix**: `MediaItem.normalize()` must enforce strict HTTP/HTTPS schemes and drop invalid URIs to `null` (for source) or `""` (for cover), rather than blindly trusting the normalizer's fallback:
+```kotlin
+// In MediaItem.normalize():
+val safeCover = coverImageUrl.trim().takeIf { 
+    it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) 
+} ?: ""
+```
+
+### 12.10 Material 3 `ModalBottomSheet` Double-Padding Hallucination
+
+* **Location**: Fix 10.7
+* **Issue**: Fix 10.7 dictates applying `Modifier.windowInsetsPadding(WindowInsets.navigationBars)` to the content inside `ModalBottomSheet` in AddItemScreen.
+* **Reason**: In Jetpack Compose Material 3, `ModalBottomSheet` *automatically* consumes and applies window insets for the navigation bar to ensure it sits above system gestures. Applying explicit navigation bar padding to its child content will result in **double padding**, causing the bottom sheet's content to float awkwardly 48-100dp above the bottom of the sheet itself.
+* **Fix**: Omit `windowInsetsPadding(WindowInsets.navigationBars)` inside `ModalBottomSheet`. Rely on M3's native inset handling for the sheet, and only apply it manually to full-screen `Scaffold` configurations if needed.
+
+---
+
+## 13. Continued Audit — Critical Issues & Regressions (Round 8)
+
+### 13.1 Catastrophic Data Loss on Export Overwrite (SAF Streaming Trap)
+
+* **Location**: Fix 10.2 (OOM Fix via Streaming API), Section 4.6 (Export Rules)
+* **Issue**: Fix 10.2 removed the intermediate temporary file during export to prevent memory exhaustion, choosing instead to stream the JSON directly to the SAF `Uri`. If a user selects their *existing* backup file to overwrite it, Android's `openOutputStream(uri, "wt")` immediately truncates the existing file to 0 bytes. If serialization fails halfway through (e.g., due to a `SerializationException`, a malformed item, or the OS killing the app in the background), the stream closes. The user's only valid backup is now permanently destroyed, replaced by a corrupted, half-written JSON file.
+* **Reason**: Direct-to-SAF streaming violates atomicity. You cannot safely overwrite a mission-critical file in place when the data generation process is vulnerable to interruption.
+* **Fix**: Combine the memory efficiency of Fix 10.2 (streaming) with the atomicity of Fix 12.1 (temp files). Stream the JSON to a local temp file first. Only after serialization completes successfully, open the SAF `Uri` and copy the stream:
+```kotlin
+@OptIn(ExperimentalSerializationApi::class)
+suspend fun export(context: Context, uri: Uri, items: List<MediaItem>) = withContext(Dispatchers.IO) {
+    val tempFile = File(context.cacheDir, "backup_${UUID.randomUUID()}.tmp")
+    try {
+        tempFile.outputStream().use { fileOut ->
+            val envelope = BackupEnvelopeDto(items = items.map { it.toDto() })
+            Json.encodeToStream(envelope, fileOut)
+        }
+        context.contentResolver.openOutputStream(uri, "wt")?.use { safOut ->
+            tempFile.inputStream().use { it.copyTo(safOut) }
+        } ?: throw IOException("Could not open output stream for $uri")
+    } finally {
+        if (tempFile.exists()) tempFile.delete()
+    }
+}
+```
+
+### 13.2 Jsoup Charset Forcing Corrupts Non-UTF-8 Sites (Manga/Novel Scraper)
+
+* **Location**: Section 4.5 (Metadata Scraper), scraper code sample
+* **Issue**: The code snippet passes `"UTF-8"` hardcoded into the parser: `Jsoup.parse(limitStream, "UTF-8", url)` (line 615).
+* **Reason**: Passing a hardcoded charset explicitly disables Jsoup's built-in algorithm that sniffs the HTML `<meta charset>` tag. Since many Japanese manga and web novel sites (which this app specifically targets) are legacy platforms serving `Shift-JIS`, `EUC-JP`, or `UTF-16`, forcing UTF-8 will silently garble the extracted titles into mojibake (unreadable characters).
+* **Fix**: Pass `null` as the charset parameter. This instructs Jsoup to read HTTP headers and HTML `<meta>` tags to detect the true encoding automatically:
+```kotlin
+val doc = Jsoup.parse(limitStream, null, url)
+```
+
+### 13.3 Network Timeout Silently Swallowed (UI Hangs)
+
+* **Location**: Section 4.5 (Scraper Error Handling), Fix 12.4
+* **Issue**: `scrape()` wraps OkHttp with `withTimeout(30_000L)`. When this times out, Kotlin throws a `TimeoutCancellationException` inside the coroutine. Because this exception extends `CancellationException`, Fix 12.4's catch block evaluates `!currentCoroutineContext().isActive` as true (since `withTimeout` cancels the coroutine before throwing) and incorrectly rethrows it as `CancellationException("Scrape cancelled", e)`.
+* **Reason**: The ViewModel intercepts this as a standard coroutine cancellation (e.g., the user navigating away) and stops processing entirely. The UI hangs indefinitely with `isLoading = true`, completely ignoring the plan's mandate to display: "Request timed out. The site may be slow..."
+* **Fix**: Catch `TimeoutCancellationException` explicitly *before* evaluating general coroutine cancellation, mapping it to a `Result.failure()` so the ViewModel receives the error state:
+```kotlin
+} catch (e: TimeoutCancellationException) {
+    Result.failure(Exception("Request timed out. The site may be slow or unreachable.", e))
+} catch (e: Exception) {
+    if (e is IOException && e.message == "Canceled" || !currentCoroutineContext().isActive) {
+        throw CancellationException("Scrape cancelled", e)
+    }
+    Result.failure(e)
+}
+```
+
+### 13.4 Ghost Item Trap on DetailScreen Deletion
+
+* **Location**: Section 4.7 (DetailScreen Inline Editing), Fix 11.2
+* **Issue**: The user taps "Delete" in the DetailScreen toolbar, confirms the dialog, and the ViewModel calls `repository.delete(id)`. However, the plan fails to emit any navigation event to pop the backstack.
+* **Reason**: Fix 11.2 changed DetailScreen to use an isolated draft state (`take(1)` from Room) rather than a live reactive stream. After deletion, the draft state is untouched and the screen has no way to detect the item is gone. The user remains trapped on a screen rendering a "ghost item" that no longer exists in the database.
+* **Fix**: `DetailViewModel` must emit a navigation event immediately after the deletion succeeds. The UI observes this event and closes the screen:
+```kotlin
+fun deleteItem() {
+    viewModelScope.launch {
+        repository.delete(itemId)
+        _events.send(DetailEvent.NavigateUp)
+    }
+}
+```
+
+### 13.5 Missing Koin-WorkManager Dependency (Compilation Failure)
+
+* **Location**: Fix 9.2 (Auto-Backup Worker Initialization), Section 6 (Dependencies)
+* **Issue**: Fix 9.2 wires up `AutoBackupWorker` using `Configuration.Builder().setWorkerFactory(get<KoinWorkerFactory>()).build()`. However, `KoinWorkerFactory` is part of the `koin-androidx-workmanager` artifact, which is completely missing from `libs.versions.toml`.
+* **Reason**: Attempting to reference `KoinWorkerFactory` results in a hard compilation failure during Phase 3.
+* **Fix**: Add the missing dependency to `libs.versions.toml`:
+```toml
+koin-androidx-workmanager = { group = "io.insert-koin", name = "koin-androidx-workmanager", version.ref = "koin" }
+```
+Ensure it is included in the `koin` bundle, and declare `workManagerFactory()` inside the Koin module setup in `Modules.kt`.
+
+### 13.6 UrlNormalizer URI Syntax Crashes on Unencoded Spaces
+
+* **Location**: Section 4.4 (UrlNormalizer), Fix 12.9
+* **Issue**: `UrlNormalizer` uses `java.net.URI(url.trim())`. If a user pastes a URL containing unencoded spaces (e.g., `https://example.com/my page`), `URI()` throws a `URISyntaxException`.
+* **Reason**: The `catch` block blindly falls back to `url.trim()`. Fix 12.9's domain scheme check only verifies the URL starts with `"http"`, meaning the un-normalized, space-containing URL bypasses deduplication, gets saved in the database, and will later cause OkHttp to crash when the scraper attempts to call it.
+* **Fix**: Replace `java.net.URI` with OkHttp's `HttpUrl.parse()`, which gracefully encodes spaces and handles web-scale URL quirks natively:
+```kotlin
+fun normalize(url: String): String {
+    val httpUrl = HttpUrl.parse(url.trim()) ?: return url.trim()
+    return httpUrl.newBuilder().fragment(null).build().toString().removeSuffix("/")
+}
+```
+
+### 13.7 Empty State Flashing (UI Race Condition)
+
+* **Location**: Section 4.7 (HomeScreen State Management)
+* **Issue**: The plan dictates: "LazyColumn of MediaCards, or EmptyState when list is empty". `HomeUiState` initializes with `isLoading = true` and `items = emptyList()`.
+* **Reason**: If the Composable merely checks `if (uiState.items.isEmpty()) { EmptyState() }`, the app will aggressively flash the "Nothing here yet" placeholder graphic for several frames on every cold boot before the Room database has time to execute its first background query and populate the list.
+* **Fix**: The Compose UI must explicitly guard the empty state behind the loading flag to prevent the flicker:
+```kotlin
+if (!uiState.isLoading && uiState.items.isEmpty()) {
+    EmptyState()
+} else if (uiState.isLoading) {
+    // Show skeleton loaders or CircularProgressIndicator
+} else {
+    // LazyColumn
+}
+```
