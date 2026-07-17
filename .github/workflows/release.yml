@@ -132,11 +132,6 @@ jobs:
       - prepare-build
       - build-app
     steps:
-      - name: Download APKs
-        uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
       - name: Check for Signing Secrets
         id: check_secrets
         run: |
@@ -146,14 +141,28 @@ jobs:
             echo "has_secrets=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Download Unsigned APK
+        if: steps.check_secrets.outputs.has_secrets == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: app-release-unsigned
+          path: release_apk
+
+      - name: Download Debug APK
+        if: steps.check_secrets.outputs.has_secrets == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: app-debug
+          path: debug_apk
+
       - name: Sign APK
         if: steps.check_secrets.outputs.has_secrets == 'true'
         uses: r0adkll/sign-android-release@f30bdd30588842ac76044ecdbd4b6d0e3e813478
         with:
-          releaseDirectory: .
+          releaseDirectory: release_apk
           signingKeyBase64: ${{ secrets.SIGNING_KEY }}
           alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+          keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
         env:
           BUILD_TOOLS_VERSION: '35.0.1'
@@ -163,7 +172,7 @@ jobs:
         run: |
           # The sign action puts the signed apk under the releaseDirectory with suffix '-signed' or similar.
           # Let's find it and rename it to the target version-tag-specific filename.
-          signed_file=$(find . -name "*-signed.apk" | head -n 1)
+          signed_file=$(find release_apk -name "*-signed.apk" | head -n 1)
           if [ -n "$signed_file" ]; then
             mv "$signed_file" "lazydex-${{ needs.prepare-build.outputs.VERSION_TAG }}.apk"
           else
@@ -174,7 +183,7 @@ jobs:
         if: steps.check_secrets.outputs.has_secrets == 'false'
         run: |
           echo "::warning::Signing secrets are missing. Renaming Debug-signed APK as fallback."
-          mv app-debug.apk "lazydex-${{ needs.prepare-build.outputs.VERSION_TAG }}.apk"
+          mv debug_apk/app-debug.apk "lazydex-${{ needs.prepare-build.outputs.VERSION_TAG }}.apk"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
