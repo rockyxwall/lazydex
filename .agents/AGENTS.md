@@ -4,16 +4,26 @@
 Local-only Android media tracker for tracking consumption progress across Novels, Anime, Manga, and Games. No accounts, no cloud, no social. Privacy-first.
 
 ### Core Features
-- Add media items via URL scraping (metadata auto-fill) or manual entry
-- Track progress (current chapter/episode/volume) with optional total
-- Toggle status: Reading / Completed
-- View all items in a filterable list (by category)
-- Tap item to open source URL in external browser
-- Edit and delete items
+- Add media items via URL scraping (metadata auto-fill: title, cover image, alternative titles) or manual entry
+- Track progress (current chapter/episode/volume) with optional total, auto-complete status when progress = total
+- Unified Add/Edit/Detail screen (AniList-style single screen for both adding and editing)
+- Status workflow: Reading/Watching/Playing → Completed → On Hold → Dropped → Plan to (category-adaptive)
+- User rating: 1.0–5.0 stars (half-star increments)
+- Alternative titles: flexible list stored as JSON, swap-to-main UI
+- Cover images downloaded to local storage (not URL-based), named by item ID
+- View all items in a READ-ONLY filterable list (cards show info only — no progress buttons)
+- Filter + Sort buttons in toolbar (Notion-inspired: ModalBottomSheet for each)
+- Multiple sort options: Last Active, Title, Progress %, Date Added
+- Color strategy: status gets color badges, category gets neutral outline + icon
+- Filter-aware empty state
+- Tap card → unified detail screen for editing
+- Delete with confirmation dialog, back-navigation with discard warning
+- Progress clamping: red error text + disabled Save when progress > total
 - Backup/restore data to JSON files via Storage Access Framework (SAF)
-- Merge or overwrite on import
-- Dark theme with dynamic color support (Android 12+)
-- Proper Settings screen (export, import, about)
+- Merge or overwrite on import (overwrite requires press-and-hold 5–10s)
+- Auto-backup via WorkManager with SAF folder picker
+- Dark theme (default) with WTR-LAB-inspired color palette, AMOLED mode, dynamic color (Monet)
+- Settings screen (export, import, theme, auto-backup, about)
 
 ### Non-Goals
 - No user accounts

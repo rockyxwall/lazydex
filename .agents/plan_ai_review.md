@@ -204,19 +204,23 @@ data class MediaItem(
     val id: String,              // UUID string
     val category: MediaCategory,
     val title: String,
+    val alternativeTitles: List<String> = emptyList(),  // Flexible list stored as JSON
     val sourceUrl: String?,      // Nullable — SQLite UNIQUE index treats NULLs as non-duplicates
-    val coverImageUrl: String,   // Can be empty
+    val coverImagePath: String,  // Local file path (not URL), empty if no cover
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
     val userStatus: UserStatus,
+    val rating: Double? = null,  // 1.0–5.0 stars, null = unrated
     val notes: String = "",      // User notes/annotations
-    val lastUpdated: Long        // System.currentTimeMillis()
+    val lastUpdated: Long,       // System.currentTimeMillis()
+    val dateAdded: Long          // System.currentTimeMillis() on creation (stable sort)
 ) {
     /**
      * Canonical normalization — run before EVERY write (add, update, import, merge).
-     * - Trims whitespace from title, sourceUrl, coverImageUrl
+     * - Trims whitespace from title, sourceUrl, coverImagePath
      * - Clamps currentProgress to [0, totalItems] when totalItems is non-null
      * - Clamps currentProgress >= 0 when totalItems is null
+     * - Caps rating to 1.0–5.0 range
      * This is the SINGLE invariant enforcement point.
      */
     fun normalize(): MediaItem {
@@ -227,12 +231,15 @@ data class MediaItem(
             safeTotal != null && currentProgress > safeTotal -> safeTotal
             else -> currentProgress
         }
+        val safeRating = rating?.coerceIn(1.0, 5.0)
         return copy(
             title = title.trim(),
+            alternativeTitles = alternativeTitles.map { it.trim() }.filter { it.isNotBlank() },
             sourceUrl = normalizedUrl,
-            coverImageUrl = coverImageUrl.trim(),
+            coverImagePath = coverImagePath.trim(),
             totalItems = safeTotal,
             currentProgress = safeProgress,
+            rating = safeRating,
             notes = notes.trim()
         )
     }
@@ -245,15 +252,18 @@ data class MediaItem(
 )
 data class MediaItemEntity(
     @PrimaryKey val id: String,
-    val category: String,        // Stored as uppercase string (e.g. "NOVEL"), no ambiguity
+    val category: String,            // Stored as uppercase string (e.g. "NOVEL"), no ambiguity
     val title: String,
-    val sourceUrl: String?,      // Nullable — multiple NULLs allowed under UNIQUE index
-    val coverImageUrl: String,
+    val alternativeTitles: String,   // JSON array: ["Alt 1", "Alt 2", ...]
+    val sourceUrl: String?,          // Nullable — multiple NULLs allowed under UNIQUE index
+    val coverImagePath: String,      // Local file path (not URL), empty if no cover
     val currentProgress: Int,
     val totalItems: Int?,
-    val userStatus: String,      // Stored as uppercase string (e.g. "READING")
+    val userStatus: String,          // Stored as uppercase string (e.g. "READING")
+    val rating: Double?,             // 1.0–5.0, null = unrated
     val notes: String,
-    val lastUpdated: Long
+    val lastUpdated: Long,
+    val dateAdded: Long
 )
 ```
 
@@ -265,14 +275,19 @@ data class MediaItemEntity(
   - **Import/merge** preserves the ID from the JSON file. A new UUID is generated ONLY if the imported item's `id` is missing, null, or empty (see 4.6 deserialization rules). This is critical: if import blindly generated new UUIDs, merge-by-ID would always treat imported items as new, creating duplicates.
 - `totalItems` being null means "unknown" — progress can go arbitrarily high (within Int range)
 - `lastUpdated` must be set on every mutation (add, edit, increment, decrement, status change)
+- `dateAdded` is set ONCE on creation (in `repository.add()`) and NEVER changed — provides stable sort order
+- `rating` is nullable Double (1.0–5.0). `normalize()` caps with `coerceIn(1.0, 5.0)`
+- `alternativeTitles` stored as JSON array string. TypeConverter converts to/from `List<String>`
+- `coverImagePath` stores local file path (not URL). Empty string = no cover. Cover images downloaded to `{appInternalDir}/covers/{itemId}.{ext}`
 - Entity ↔ Domain mapping uses `MediaCategory.fromString()` and `UserStatus.fromString()` — case-insensitive, defaults to null for unknown values → fail closed (reject the item or skip). The repository must wrap the mapping in try/catch inside `mapNotNull` to prevent a single corrupted row (e.g., from a future backup restore introducing "PODCAST") from crashing the entire Flow stream with a NullPointerException
-- Room TypeConverters or column types? **Decision**: store enum strings directly as columns, use `@TypeConverters` only if you need reusable conversion. Since the DAO already works with raw strings, skip TypeConverters. The repository handles entity↔domain mapping.
+- Room TypeConverters or column types? **Decision**: store enum strings directly as columns, use `@TypeConverters` only if you need reusable conversion. Since the DAO already works with raw strings, skip TypeConverters. The repository handles entity↔domain mapping. Alternative titles need a TypeConverter for `List<String>` ↔ JSON string.
 - **`sourceUrl` has a SQLite UNIQUE index** (`@Entity(indices = [Index(value = ["sourceUrl"], unique = true)])`). **sourceUrl must be nullable (`String?`)** — SQLite treats empty strings `""` as equal under a UNIQUE index, so a second item with no URL would throw `SQLiteConstraintException`. Null values are never considered duplicates. This is a database-level safeguard — duplicate URL detection is NOT solely the UI's responsibility. The repository must catch `SQLiteConstraintException` and map it to a domain exception. See Section 4.4 for error handling.
 
 ### 4.2 Room Database
 
 ```kotlin
 @Database(entities = [MediaItemEntity::class], version = 1, exportSchema = false)
+@TypeConverters(Converters::class)
 abstract class LazyDexDatabase : RoomDatabase() {
     abstract fun mediaItemDao(): MediaItemDao
 }
@@ -293,16 +308,19 @@ abstract class LazyDexDatabase : RoomDatabase() {
 @Dao
 interface MediaItemDao {
     // Reactive queries
-    @Query("SELECT * FROM media_items ORDER BY lastUpdated DESC")
+    @Query("SELECT * FROM media_items ORDER BY dateAdded DESC")
     fun observeAll(): Flow<List<MediaItemEntity>>
 
-    @Query("SELECT * FROM media_items WHERE category = :category ORDER BY lastUpdated DESC")
+    @Query("SELECT * FROM media_items WHERE category = :category ORDER BY dateAdded DESC")
     fun observeByCategory(category: String): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT * FROM media_items ORDER BY :sortBy ASC")
+    fun observeAllSorted(sortBy: String): Flow<List<MediaItemEntity>>
 
     @Query("SELECT COUNT(*) FROM media_items")
     fun observeCount(): Flow<Int>
 
-    // Reactive single-item observation (used by DetailViewModel)
+    // Reactive single-item observation (used by ViewModel)
     @Query("SELECT * FROM media_items WHERE id = :id")
     fun observeById(id: String): Flow<MediaItemEntity?>
 
@@ -516,7 +534,8 @@ class MetadataScraper(private val okHttpClient: OkHttpClient) {
 
     data class ScrapedMetadata(
         val title: String,
-        val imageUrl: String
+        val imageUrl: String,
+        val alternativeTitles: List<String> = emptyList()
     )
 }
 ```
@@ -641,12 +660,15 @@ private data class MediaItemBackupDto(
     val id: String? = null,
     val category: String? = null,
     val title: String? = null,
+    val alternativeTitles: List<String>? = null,
     val sourceUrl: String? = null,
-    val coverImageUrl: String? = null,
     val currentProgress: Int? = null,
     val totalItems: Int? = null,
     val userStatus: String? = null,
-    val lastUpdated: Long? = null
+    val rating: Double? = null,
+    val notes: String? = null,
+    val lastUpdated: Long? = null,
+    val dateAdded: Long? = null
 )
 
 object BackupProcessor {
@@ -677,32 +699,40 @@ object BackupProcessor {
         id = id,
         category = category.name,
         title = title,
+        alternativeTitles = alternativeTitles.ifEmpty { null },
         sourceUrl = sourceUrl,
-        coverImageUrl = coverImageUrl,
         currentProgress = currentProgress,
         totalItems = totalItems,
         userStatus = userStatus.name,
-        lastUpdated = lastUpdated
+        rating = rating,
+        notes = notes.ifBlank { null },
+        lastUpdated = lastUpdated,
+        dateAdded = dateAdded
     )
 }
 
 private fun MediaItemBackupDto.toDomain(): MediaItem? {
     val safeTitle = title?.takeIf { it.isNotBlank() } ?: return null
     val safeCategory = category?.let { MediaCategory.fromString(it) } ?: return null
-    val safeStatus = userStatus?.let { UserStatus.fromString(it) } ?: UserStatus.READING
+    val safeStatus = userStatus?.let { UserStatus.fromString(it) } ?: inProgressStatusFor(safeCategory)
     val safeProgress = maxOf(currentProgress ?: 0, 0)
     val safeTotal = totalItems?.takeIf { it >= 0 }
     val safeLastUpdated = if (lastUpdated != null && lastUpdated > 0L) lastUpdated else 0L
+    val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else 0L
     return MediaItem(
         id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
         category = safeCategory,
         title = safeTitle,
+        alternativeTitles = alternativeTitles ?: emptyList(),
         sourceUrl = sourceUrl?.trim(),
-        coverImageUrl = coverImageUrl?.trim() ?: "",
+        coverImagePath = "",  // Covers are local files — cannot import from backup
         currentProgress = safeProgress,
         totalItems = safeTotal,
         userStatus = safeStatus,
-        lastUpdated = safeLastUpdated
+        rating = rating?.coerceIn(1.0, 5.0),
+        notes = notes?.trim() ?: "",
+        lastUpdated = safeLastUpdated,
+        dateAdded = safeDateAdded
     ).normalize()
 }
 
@@ -721,12 +751,15 @@ object BackupManager {
             "id": "uuid-string",
             "category": "NOVEL",
             "title": "Example",
+            "alternativeTitles": ["Alt 1", "Alt 2"],
             "sourceUrl": "https://...",
-            "coverImageUrl": "https://...",
             "currentProgress": 42,
             "totalItems": 100,
             "userStatus": "READING",
-            "lastUpdated": 1700000000000
+            "rating": 4.5,
+            "notes": "My notes",
+            "lastUpdated": 1700000000000,
+            "dateAdded": 1700000000000
         }
     ]
 }
@@ -787,38 +820,45 @@ object BackupManager {
 
 ### 4.7 UI Screens
 
-#### HomeScreen
-- TopAppBar with title "LazyDex" and settings gear icon
-- Filter chips row: [All] [Novels] [Manga] [Anime] [Games] [Movies] [TV] — single selection, "All" by default
-- Secondary filter chips (optional): status filter — [All] [Reading] [Completed] [On Hold] [Dropped] [Plan to]
-- LazyColumn of MediaCards, or EmptyState when list is empty
-- FAB: + icon to open AddItemSheet
-- Each card shows: cover image (async via Coil), title, category badge, status badge, progress (current/total), last updated relative time, increment [+] / decrement [-] buttons
-- Tap card body → navigate to DetailScreen
-- Tap [+] → increment progress (atomic — goes to repository, no need to read current value)
-- Tap [-] → decrement progress (atomic)
-- Long press card → context menu: Edit (→ DetailScreen) / Delete
+#### HomeScreen (Read-Only List)
+- TopAppBar with title "LazyDex", [Filter] and [Sort] buttons, and settings gear icon
+- Active filter pills shown as compact chips below toolbar
+- LazyColumn of MediaCards, or EmptyState when list is empty (filter-aware)
+- FAB: + icon to open UnifiedAddEditScreen in add mode
+- Each card shows: cover image (async via Coil from local path), title, status badge (color-filled), category badge (outline + icon), rating stars, progress text (current/total), last updated relative time
+- Cards are READ-ONLY — no progress buttons on cards. No long-press context menu
+- Tap card body → navigate to UnifiedAddEditScreen in edit mode with item `id`
 
 **State Management**:
 ```kotlin
 data class HomeUiState(
     val items: List<MediaItem> = emptyList(),
     val selectedCategory: MediaCategory? = null,  // null = "All"
+    val selectedStatus: UserStatus? = null,        // null = "All"
+    val sortOrder: SortOrder = SortOrder.DATE_ADDED_DESC,
     val isLoading: Boolean = true
 )
 
-sealed interface HomeEvent {
-    data class Increment(val itemId: String) : HomeEvent
-    data class Decrement(val itemId: String) : HomeEvent
-    data class ToggleStatus(val itemId: String) : HomeEvent
-    data class SelectCategory(val category: MediaCategory?) : HomeEvent
-    data class OpenItem(val url: String) : HomeEvent
-    data class OpenDetail(val itemId: String) : HomeEvent
-    data class DeleteItem(val item: MediaItem) : HomeEvent
+enum class SortOrder {
+    DATE_ADDED_DESC,
+    LAST_UPDATED_DESC,
+    TITLE_ASC,
+    PROGRESS_ASC
+}
+
+sealed interface HomeAction {
+    data class SelectCategory(val category: MediaCategory?) : HomeAction
+    data class SelectStatus(val status: UserStatus?) : HomeAction
+    data class SelectSort(val sortOrder: SortOrder) : HomeAction
+    data class OpenDetail(val itemId: String) : HomeAction
+}
+
+sealed interface HomeUiEvent {
+    data class OpenItem(val url: String) : HomeUiEvent
 }
 ```
 
-**Filtering Strategy**: Uses `flatMapLatest` on a `StateFlow<MediaCategory?>` to let SQLite do the work — never pull 10k items into RAM to filter to 50:
+**Filtering Strategy**: Uses `combine` on `StateFlow<MediaCategory?>`, `StateFlow<UserStatus?>`, and `StateFlow<SortOrder>` to let SQLite do the work:
 
 ```kotlin
 class HomeViewModel(
@@ -826,50 +866,52 @@ class HomeViewModel(
 ) : ViewModel() {
 
     private val selectedCategoryFlow = MutableStateFlow<MediaCategory?>(null)
+    private val selectedStatusFlow = MutableStateFlow<UserStatus?>(null)
+    private val sortOrderFlow = MutableStateFlow(SortOrder.DATE_ADDED_DESC)
 
-    val uiState: StateFlow<HomeUiState> = selectedCategoryFlow
-        .flatMapLatest { category ->
-            val flow = if (category == null) repository.observeAll()
-                       else repository.observeByCategory(category)
-            flow.map { items ->
-                HomeUiState(items = items, selectedCategory = category, isLoading = false)
-            }
+    val uiState: StateFlow<HomeUiState> = combine(
+        selectedCategoryFlow, selectedStatusFlow, sortOrderFlow
+    ) { category, status, sort -> Triple(category, status, sort) }
+        .flatMapLatest { (category, status, sort) ->
+            repository.observeFiltered(category, status, sort)
+                .map { items ->
+                    HomeUiState(
+                        items = items,
+                        selectedCategory = category,
+                        selectedStatus = status,
+                        sortOrder = sort,
+                        isLoading = false
+                    )
+                }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
-    fun selectCategory(category: MediaCategory?) {
-        selectedCategoryFlow.value = category
-    }
+    fun selectCategory(category: MediaCategory?) { selectedCategoryFlow.value = category }
+    fun selectStatus(status: UserStatus?) { selectedStatusFlow.value = status }
+    fun selectSort(sort: SortOrder) { sortOrderFlow.value = sort }
 
     // One-shot event channel for navigation/intents
-    private val _events = Channel<HomeEvent>(Channel.BUFFERED)
-    val events: Flow<HomeEvent> = _events.receiveAsFlow()
-
-    // Debounce spam-clicks on card body tap — prevents multiple overlapping
-    // ACTION_VIEW intents when a user rapidly taps a card. The Channel queues
-    // events immediately; the 500ms window drops duplicate OpenItem for the same URL.
-    private var lastOpenTime = 0L
+    private val _events = Channel<HomeUiEvent>(Channel.BUFFERED)
+    val events: Flow<HomeUiEvent> = _events.receiveAsFlow()
 
     fun openItem(url: String) {
-        val now = System.currentTimeMillis()
-        if (now - lastOpenTime > 500L) {
-            lastOpenTime = now
-            viewModelScope.launch {
-                _events.send(HomeEvent.OpenItem(url))
-            }
+        viewModelScope.launch {
+            _events.send(HomeUiEvent.OpenItem(url))
         }
     }
 }
 ```
 
 **AI Verification Checklist**:
-- Increment/decrement go through repository atomic SQL — no race condition. No debounce needed. Rapid taps are safe.
-- `openItem` emits a one-shot event via `Channel<HomeEvent>` (not StateFlow) — handled by Activity to start an `Intent.ACTION_VIEW`. **Spam-click protection**: `openItem()` debounces by dropping events within a 500ms window of the last emission to prevent multiple overlapping browser intents
-- Long press → Edit navigates to DetailScreen. Delete shows a confirmation dialog (Composable dialog, not AlertDialog)
-- Relative time display: calculate at render time inside the Composable. It's not a live clock — "5m ago" being 6m ago is acceptable.
-- Cover image: `AsyncImage` from Coil with placeholder and error drawables. If `coverImageUrl` is empty, don't load anything.
-- Card click: use `LocalContext.current` to start an Activity. Never pass Context to ViewModel.
-- FAB click: navigate to AddItemScreen (bottom sheet route).
+- Cards are READ-ONLY. No increment/decrement buttons. No long-press context menu.
+- Tap card → navigate to UnifiedAddEditScreen (edit mode) with item `id`. Card click never starts an Activity — it navigates within the app.
+- [Filter] button opens FilterBottomSheet (ModalBottomSheet) with category + status selection
+- [Sort] button opens SortBottomSheet (ModalBottomSheet) with sort order + direction
+- Filter/sort state persisted in ViewModel `StateFlow`s — survives config changes
+- Empty state is filter-aware: if filters active and no matches → "No items match your filters. [Clear Filters]"
+- Cover image loaded from local `coverImagePath` via Coil. Gradient+initials fallback if path empty.
+- Relative time display: calculate at render time. Acceptable for "5m ago" to become "6m ago".
+- FAB click: navigate to UnifiedAddEditScreen in add mode.
 
 #### AddItemScreen (Bottom Sheet)
 - Manual entry form as the primary interface
@@ -984,13 +1026,21 @@ fun LazyDexTheme(
 **Requirements**:
 - Dynamic color on Android 12+ (Monet / Material You)
 - Fallback to custom light/dark palettes on older versions
-- Dark mode follows system setting by default, toggle in settings
+- Dark mode is default (WTR-LAB inspired), toggle in settings
 - Amoled mode option: uses pure black (#000000) backgrounds when enabled
 - All Material3 components used consistently (MaterialCard, Material3 buttons, etc.)
-- Surface colors, background colors, card colors follow Material3 spec
-- Category colors (Novel=blue, Manga=green, Anime=red, Game=purple, Movie=orange, TV=teal) — use from `Color.kt` not theme
-- Status colors (Reading/Watching/Playing=blue, Completed=green, On Hold=yellow, Dropped=red, Plan to=gray)
-- Badge backgrounds should be semi-transparent versions of the badge text color
+- Surface colors, background colors, card colors follow Material3 spec — with WTR-LAB palette:
+  - Background: `#1b1d23` (dark), `#f2f3f4` (light)
+  - Card surface: `#1f2129` (dark), `#ffffff` (light)
+  - Toolbar: `#212529` (dark)
+  - Primary: `#5795d9` (dark), `#4288c9` (light)
+  - Accent: `#fd7e14` (progress, highlights)
+- **Color strategy**: Status gets color badges. Category gets neutral outline + Material icon. Rationale: 6 categories × 5 statuses = 30 color combos is visual noise. Status colors have universal associations (green=completed, red=dropped). Category icons are scannable without color memory.
+- Status colors (Reading/Watching/Playing=primary blue, Completed=`#22c55e`, On Hold=`#eab308`, Dropped=`#ef4444`, Plan to=`#6b7280`)
+- Category representation: outline-style badge with Material icon (Book for Novel/Manga, Gamepad for Game, Film for Movie, TV for Anime/TV)
+- Badge backgrounds should be semi-transparent versions of the badge text color (`color.copy(alpha = 0.15f)`)
+- Rating colors: 1.0=`#ef4444` → 3.0=`#eab308` → 5.0=`#22c55e` with interpolation
+- See `DESIGN.md` for complete theme mapping including typography (Nunito Sans + JetBrains Mono) and spacing
 
 **AI Verification Checklist**:
 - `dynamicColor` must check `Build.VERSION.SDK_INT >= Build.VERSION_CODES.S` before using `dynamicLightColorScheme()` / `dynamicDarkColorScheme()`
@@ -1092,7 +1142,7 @@ These are **not** exhaustive. The AI must consider every scenario below and any 
 
 4. **Import overwrite + process death**: User imports, chooses "Overwrite". The DAO's `@Transaction replaceAll()` runs `deleteAll()` + `upsertAll()` atomically. If process dies mid-transaction, Room rolls back. No data loss.
 
-5. **Two screens editing the same item**: User opens Edit screen, then goes home and edits the same item via the list. The Edit screen still has stale data. On save, it overwrites the other change. **Decision for v1**: Last save wins. No optimistic locking. This is acceptable for a single-user local app. If implementing locking later, add `expectedLastUpdated: Long` parameter to `repository.update()` and check in DAO: `UPDATE ... WHERE id = :id AND lastUpdated = :expectedLastUpdated`. If 0 rows affected, throw `StaleDataException`.
+5. **Two screens editing the same item**: User opens Edit screen, then goes home and opens the same item again via the list. The first Edit screen still has stale data. On save, it overwrites the other change. **Decision for v1**: Last save wins. No optimistic locking. This is acceptable for a single-user local app. If implementing locking later, add `expectedLastUpdated: Long` parameter to `repository.update()` and check in DAO: `UPDATE ... WHERE id = :id AND lastUpdated = :expectedLastUpdated`. If 0 rows affected, throw `StaleDataException`.
 
 6. **Scraping the same URL twice**: User adds URL A, it scrapes successfully. User adds URL A again. The duplicate check (normalized URL comparison) prevents adding. If first scrape is still in progress, the form fields are disabled — second tap is blocked.
 
@@ -1104,7 +1154,13 @@ These are **not** exhaustive. The AI must consider every scenario below and any 
 
 10. **Cover image URL that returns a redirect to a malicious site**: Coil handles redirects. Verify that Coil doesn't follow redirects to `file://` or `content://` schemes. This is a Coil security concern — check Coil's redirect policy. If needed, add a custom `Interceptor` to OkHttp client that rejects redirects to non-http schemes.
 
-11. **Empty database on first launch**: Show empty state with friendly message: "Nothing here yet. Tap + to add your first item."
+11. **Empty database on first launch**: Show empty state with friendly message: "Nothing here yet. Tap + to add your first item." If filters are active, show: "No items match your filters. [Clear Filters]"
+
+11b. **Cover image download failure**: Scrape extracts og:image URL but download fails. Show gradient+icon fallback in UI. User can provide alternative URL in edit mode to trigger re-download. Local file path stored in Room (empty string if never downloaded).
+
+11c. **Alternative title swap**: When user taps [↕] on an alt title, current main title moves to position 0 of alt list, selected alt becomes main. Database updated atomically with `normalize()`.
+
+11d. **Progress = total auto-complete**: When user sets `currentProgress = totalItems` and total is non-null, ViewModel automatically sets status to `COMPLETED`. User can override this by manually changing status.
 
 12. **System locale / RTL**: App supports RTL layouts (`supportsRtl="true"` in manifest). Compose handles this with `LocalLayoutDirection`. All paddings use `Start`/`End` not `Left`/`Right`.
 
@@ -1136,7 +1192,7 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Create `data/local/entity/MediaItemEntity.kt`
 - [ ] Create `data/local/dao/MediaItemDao.kt` (with atomic increment/decrement, `@Transaction replaceAll`)
 - [ ] Create `data/local/LazyDexDatabase.kt` (exportSchema = false, WAL mode)
-- [ ] (TypeConverters not needed — enums stored as raw strings per Section 4.1 decision)
+- [ ] Create `data/local/converter/Converters.kt` — TypeConverter for `List<String>` ↔ JSON string (alternative titles)
 - [ ] Create `data/repository/MediaRepositoryImpl.kt` (normalize() on every write, UUID in add only)
 - [ ] Create `util/UrlNormalizer.kt` (single canonical normalizer, used by repository + scraper)
 - [ ] Write tests for MediaRepositoryImpl (insert, read, update, delete, atomic increment/decrement, replaceAll transaction, normalize enforcement)
@@ -1169,12 +1225,15 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] **AI must verify**: Theme compiles, dynamic color works on Android 12+ emulator, fallback works on Android 8-11, WCAG contrast ratios met
 
 ### Phase 5: Core UI Components
-- [ ] Create `ui/components/MediaCard.kt`
-- [ ] Create `ui/components/CategoryFilterChips.kt`
-- [ ] Create `ui/components/CategoryBadge.kt`
-- [ ] Create `ui/components/StatusBadge.kt`
-- [ ] Create `ui/components/ProgressControls.kt`
-- [ ] Create `ui/components/EmptyState.kt`
+- [ ] Create `ui/components/MediaCard.kt` (READ-ONLY — no buttons, covers local path)
+- [ ] Create `ui/components/FilterBottomSheet.kt` (category + status selection)
+- [ ] Create `ui/components/SortBottomSheet.kt` (sort order selection)
+- [ ] Create `ui/components/CategoryBadge.kt` (outline + icon, no color fill)
+- [ ] Create `ui/components/StatusBadge.kt` (color-filled pill)
+- [ ] Create `ui/components/StarRating.kt` (tappable 1.0–5.0 with half-stars)
+- [ ] Create `ui/components/AltTitleEditor.kt` (dynamic list with swap/add/remove)
+- [ ] Create `ui/components/CoverImage.kt` (local path loading + gradient fallback)
+- [ ] Create `ui/components/EmptyState.kt` (filter-aware messages)
 - [ ] **AI must verify**: Each component is reusable, accepts proper parameters, handles edge cases (empty strings, null values, long text, RTL)
 
 ### Phase 6: Home Screen
@@ -1184,24 +1243,27 @@ The AI MUST follow this order. Each phase depends on the previous one.
 - [ ] Handle all user interactions (atomic increment, decrement, status toggle, tap, long press)
 - [ ] **AI must verify**: All interactions work, loading states are correct, filter works, empty state shows, config change survives, one-shot events use Channel
 
-### Phase 7: Add Item Screen
+### Phase 7: Scraper
 - [ ] Create `scraper/MetadataScraper.kt` + tests (MockWebServer for HTTP responses)
-- [ ] Create `ui/add/AddItemViewModel.kt`
-- [ ] Create `ui/add/AddItemScreen.kt`
+- [ ] Update `ScrapedMetadata` to include `alternativeTitles: List<String>`, `imageUrl: String`
 - [ ] Handle scrape flow (loading, success, failure with inline error)
-- [ ] Handle manual entry
-- [ ] Form validation (title required, URL format, progress bounds)
-- [ ] Duplicate URL detection (using UrlNormalizer)
-- [ ] **AI must verify**: Scrape works with real URLs, form validates correctly, scrape cancellation works, orientation change preserves form state, no UUID generation in ViewModel
+- [ ] **AI must verify**: Scrape works with real URLs, extracts title/og:image/alt titles, scrape cancellation works
 
-### Phase 8: Detail Screen (Inline Editing)
-- [ ] Create `ui/detail/DetailViewModel.kt`
-- [ ] Create `ui/detail/DetailScreen.kt`
-- [ ] Pre-populate with existing data
-- [ ] Inline editing: edit fields in place, save button calls repository.update()
-- [ ] Delete with confirmation dialog
+### Phase 8: Unified Add/Edit Screen
+- [ ] Create `ui/addedit/UnifiedAddEditViewModel.kt`
+- [ ] Create `ui/addedit/UnifiedAddEditScreen.kt`
+- [ ] Single screen handles both add mode (empty + scrape) and edit mode (pre-filled + delete)
+- [ ] Add mode: URL input + Auto-fill button, scrape fills blocked fields
+- [ ] Edit mode: pre-populate from DB via `observeById(id).take(1)` → draft `MutableStateFlow`
+- [ ] Alternative titles: dynamic list with swap-to-main, add, remove
+- [ ] Rating: 5 tappable stars (half-star precision)
+- [ ] Cover image: display from local path, gradient fallback
+- [ ] Form validation: title required, progress ≤ total (red error + disable Save)
+- [ ] Back navigation with unsaved changes → confirmation dialog
+- [ ] Delete with confirmation dialog (edit mode only)
+- [ ] Save calls `repository.update()` (edit) or `repository.add()` (add)
 - [ ] Source URL button to open in external browser
-- [ ] **AI must verify**: Editing works, delete works, all fields modifiable, source URL is editable, lastUpdated updates on save, no separate edit screen needed
+- [ ] **AI must verify**: Both modes work, form state preserved on config change, validation correct, no UUID generation in ViewModel, back button shows dialog, scrape blocks only conflicting fields
 
 ### Phase 9: Settings Screen
 - [ ] Create `backup/BackupProcessor.kt` + tests (round-trip, merge, schema version default 1, case-insensitive enums)
@@ -1217,9 +1279,10 @@ The AI MUST follow this order. Each phase depends on the previous one.
 
 ### Phase 10: Navigation
 - [ ] Create `ui/navigation/NavGraph.kt`
-- [ ] Wire all screens together
+- [ ] Wire all screens together (Home, UnifiedAddEdit with optional itemId arg for edit mode, Settings)
 - [ ] Handle up/back navigation correctly
-- [ ] **AI must verify**: All routes defined, navigation type-safe (Kotlin serialization plugin for nav args), back stack correct, no duplicate destinations, bottom sheet as route
+- [ ] UnifiedAddEdit has two modes: add mode (no nav arg) and edit mode (itemId nav arg)
+- [ ] **AI must verify**: All routes defined, navigation type-safe (Kotlin serialization plugin for nav args), back stack correct, no duplicate destinations, bottom sheet replaced by full-screen UnifiedAddEdit
 
 ### Phase 11: Polish & Testing
 - [ ] Write ViewModel unit tests (MockK for repository, verify state changes, one-shot events)
@@ -1260,6 +1323,8 @@ mockwebserver = "4.12.0"
 compose-ui-test = "1.7.6"
 androidx-test-ext = "1.2.1"
 androidx-test-runner = "1.6.2"
+datastore = "1.1.1"
+work = "2.10.0"
 
 [libraries]
 # Compose
@@ -1317,6 +1382,13 @@ turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine
 kotest-assertions-core = { group = "io.kotest", name = "kotest-assertions-core", version.ref = "kotest-assertions" }
 mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "mockwebserver" }
 coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# DataStore
+datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version = "1.1.1" }
+
+# WorkManager
+work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version = "2.10.0" }
+koin-androidx-workmanager = { group = "io.insert-koin", name = "koin-androidx-workmanager", version.ref = "koin" }
 
 # Debug
 leakcanary = { group = "com.squareup.leakcanary", name = "leakcanary-android", version = "2.14" }
@@ -1378,13 +1450,13 @@ Both tracks coexist via the `de.mannodermaus.android-junit5` plugin. The plugin 
 | BackupProcessor | Serialize/deserialize round-trip, merge logic, schemaVersion defaults to 1, case-insensitive enums, invalid JSON, empty list | JUnit5 |
 | MetadataScraper | URL validation, successful scrape, various error responses (timeout, 404, empty body, malformed HTML) | JUnit5 + MockWebServer |
 | HomeViewModel | Filtering, increment/decrement events, state mapping, one-shot events via Channel | JUnit5 + MockK + Turbine |
-| AddItemViewModel | Form validation, scrape flow states, duplicate detection, form state preservation | JUnit5 + MockK + Turbine |
-| DetailViewModel | Load existing item, save changes, delete | JUnit5 + MockK + Turbine |
+| UnifiedAddEditViewModel | Form validation (both add + edit modes), scrape flow states, alt title swap, rating, cover download, discard dialog trigger, delete | JUnit5 + MockK + Turbine |
 
 ### Compose UI Tests (Instrumented, Nice to Have)
-- Compose UI tests for key flows: add item form validation, edit item save, filter list interaction
+- Compose UI tests for key flows: add item form validation, edit item save, filter list interaction, sort interaction
 - Use `createComposeRule()` + `ComposeTestRule` in `src/androidTest/`
 - Run with JUnit4 `@RunWith(AndroidJUnit4::class)`
+- Test files: `HomeScreenTest.kt`, `UnifiedAddEditScreenTest.kt`, `SettingsScreenTest.kt`
 
 ### AI Verification Checklist
 - Tests are deterministic (no flakiness) — use `TestCoroutineDispatcher` or `StandardTestDispatcher` for coroutine-based tests
@@ -1491,7 +1563,7 @@ app/
 │   │   │   │   │   ├── LazyDexDatabase.kt
 │   │   │   │   │   ├── entity/MediaItemEntity.kt
 │   │   │   │   │   ├── dao/MediaItemDao.kt
-│   │   │   │   │   # converter/ omitted — TypeConverters not needed (enums stored as raw strings)
+│   │   │   │   │   ├── converter/Converters.kt
 │   │   │   │   └── repository/MediaRepositoryImpl.kt
 │   │   │   ├── domain/
 │   │   │   │   ├── model/
@@ -1508,21 +1580,21 @@ app/
 │   │   │   │   ├── home/
 │   │   │   │   │   ├── HomeScreen.kt
 │   │   │   │   │   └── HomeViewModel.kt
-│   │   │   │   ├── add/
-│   │   │   │   │   ├── AddItemScreen.kt
-│   │   │   │   │   └── AddItemViewModel.kt
-│   │   │   │   ├── detail/
-│   │   │   │   │   ├── DetailScreen.kt
-│   │   │   │   │   └── DetailViewModel.kt
+│   │   │   │   ├── addedit/
+│   │   │   │   │   ├── UnifiedAddEditScreen.kt
+│   │   │   │   │   └── UnifiedAddEditViewModel.kt
 │   │   │   │   ├── settings/
 │   │   │   │   │   ├── SettingsScreen.kt
 │   │   │   │   │   └── SettingsViewModel.kt
 │   │   │   │   └── components/
 │   │   │   │       ├── MediaCard.kt
-│   │   │   │       ├── CategoryFilterChips.kt
+│   │   │   │       ├── FilterBottomSheet.kt
+│   │   │   │       ├── SortBottomSheet.kt
 │   │   │   │       ├── CategoryBadge.kt
 │   │   │   │       ├── StatusBadge.kt
-│   │   │   │       ├── ProgressControls.kt
+│   │   │   │       ├── StarRating.kt
+│   │   │   │       ├── AltTitleEditor.kt
+│   │   │   │       ├── CoverImage.kt
 │   │   │   │       └── EmptyState.kt
 │   │   │   ├── di/Modules.kt
 │   │   │   ├── scraper/MetadataScraper.kt
@@ -1540,8 +1612,7 @@ app/
 │   │   ├── scraper/MetadataScraperTest.kt
 │   │   ├── backup/BackupProcessorTest.kt
 │   │   ├── ui/home/HomeViewModelTest.kt
-│   │   ├── ui/add/AddItemViewModelTest.kt
-│   │   └── ui/detail/DetailViewModelTest.kt
+│   │   └── ui/addedit/UnifiedAddEditViewModelTest.kt
 │   └── androidTest/kotlin/com/rockyxwall/lazydex/
 │       └── ui/ (Compose UI tests)
 │           ├── HomeScreenTest.kt

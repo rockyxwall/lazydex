@@ -9,17 +9,19 @@
 ## 1. Feature Inventory
 
 | # | Feature | Description | Screens Involved |
-|---|---------|-------------|-----------------|
-| 1 | **Add Media** | Manual entry + URL scrape (novels) auto-fill | AddItemSheet → Home |
-| 2 | **Progress Tracking** | Increment/decrement via atomic SQL buttons | Home (cards), Detail |
-| 3 | **Status Workflow** | 7 statuses: Reading/Watching/Playing → Completed → On Hold → Dropped → Plan to | Detail, AddItemSheet |
-| 4 | **Filtered List** | Category chips + status chips, SQL-backed filtering | Home |
-| 5 | **Detail View** | Full detail + inline editing + source URL launch | Detail |
-| 6 | **Edit & Delete** | Inline edit on Detail, delete with confirmation | Detail |
-| 7 | **Backup/Restore** | SAF JSON export/import + merge/overwrite | Settings |
-| 8 | **Auto-Backup** | WorkManager scheduled daily/weekly | Background |
-| 9 | **Theming** | Dark default, Light toggle, Dynamic Color (Monet), Amoled mode | Settings → Global |
-| 10 | **Settings Hub** | Data ops, Theme toggles, Auto-backup config, About | Settings |
+| |---------|-------------|-----------------|
+| 1 | **Add/Edit Media** | Unified screen for adding + editing. URL scrape auto-fills title, cover, alt titles, category | UnifiedAddEdit |
+| 2 | **Progress Tracking** | Edit progress in UnifiedAddEdit screen. Auto-complete status when progress = total | UnifiedAddEdit |
+| 3 | **Status Workflow** | 5 statuses (category-adaptive): in-progress → Completed → On Hold → Dropped → Plan to | UnifiedAddEdit |
+| 4 | **Filtered List** | [Filter] + [Sort] buttons in toolbar → ModalBottomSheet. Notion-inspired | Home |
+| 5 | **Read-Only List** | Cards show info only — no progress buttons. Tap card → UnifiedAddEdit | Home |
+| 6 | **Rating** | User-input 1.0–5.0 stars (half-star increments), displayed as stars | UnifiedAddEdit |
+| 7 | **Alternative Titles** | Dynamic list (JSON), swap-to-main UI, scraped from URL | UnifiedAddEdit |
+| 8 | **Cover Images** | Downloaded to local storage (named by item ID), not URL-based | UnifiedAddEdit |
+| 9 | **Backup/Restore** | SAF JSON export/import + merge/overwrite (press-and-hold 5–10s for overwrite) | Settings |
+| 10 | **Auto-Backup** | WorkManager scheduled with SAF folder picker + persisted URI | Settings |
+| 11 | **Theming** | Dark-first, WTR-LAB palette, Light toggle, Dynamic Color (Monet), Amoled mode | Settings → Global |
+| 12 | **Settings Hub** | Data ops, Theme toggles, Auto-backup config, About | Settings |
 
 ---
 
@@ -27,24 +29,28 @@
 
 ```
 ┌──────────────┐
-│   HomeScreen │ ◄──────────────────┐
-│  (Main List) │                    │
-└──┬───┬───┬───┘                    │
-   │   │   │                        │
-   │   │   └── FAB [+] ─────────────┐
-   │   │                            │
-   │   └── Tap Card ─────────┐      │
-   │                         │      │
-   ▼                         ▼      │
-┌──────────────┐    ┌──────────────┐ │
-│ AddItemSheet │    │ DetailScreen │─┤
-│ (BottomSheet)│    │ (Inline Edit)│ │
-└──────────────┘    └──────┬───────┘ │
-                           │         │
-                           │ Delete  │
-                           ▼         │
-                      HomeScreen ◄───┘
-                           ▲
+│   HomeScreen │ ◄──────────────────────┐
+│  (Read-Only  │                        │
+│   List)      │                        │
+└──┬───┬───┬───┘                        │
+   │   │   │                            │
+   │   │   └── FAB [+] ─────────────────┐
+   │   │           (mode=add)           │
+   │   └── Tap Card ──────────────┐     │
+   │          (mode=edit)         │     │
+   ▼                             ▼     │
+┌───────────────────────────────────┐  │
+│    UnifiedAddEditScreen           │  │
+│  (Single screen: Add OR Edit)     │──┤
+│  - Add mode: empty fields + scrap │  │
+│  - Edit mode: pre-filled + save   │  │
+│  - Delete button (edit mode only) │  │
+│  - Rating, alt titles, cover path │  │
+└──────────────┬────────────────────┘  │
+               │ Delete confirmation   │
+               ▼                       │
+          HomeScreen ◄─────────────────┘
+               ▲
 ┌──────────────┐           │
 │SettingsScreen│── Back ───┘
 │  (Full Page) │
@@ -59,28 +65,25 @@
 
 ## 3. Screen-by-Screen UX Flow
 
-### 3.1 HomeScreen — Main List
+### 3.1 HomeScreen — Read-Only List
 
-**Entry Point**: App launch (if empty → EmptyState)
+**Entry Point**: App launch (if empty → filter-aware EmptyState)
 
 ```
 ┌─────────────────────────────────────┐
-│ [←] LazyDex                  [⚙️]  │  ← TopAppBar
+│ LazyDex        [Filter][Sort] [⚙️] │  ← TopAppBar with Filter+Sort buttons
 ├─────────────────────────────────────┤
-│ [All] [Novels] [Manga] [Anime] ... │  ← CategoryFilterChips
-│ [All] [Reading] [Completed] ...    │  ← StatusFilterChips
+│ [Novel] [Manga] [Anime] ... (chips) │  ← Active filter pills (compact, below toolbar)
 ├─────────────────────────────────────┤
 │ ┌───────────────────────────────┐  │
-│ │ 🖼️ Title of Media             │  │
-│ │    [Novel] [Reading]          │  │  ← MediaCard
+│ │ 🖼️ Title of Media          ⭐ │  │
+│ │    [Reading]   📖 Novel       │  │  ← MediaCard (READ-ONLY)
 │ │    Ch. 42 / 100  •  5m ago    │  │
-│ │              [-] 42 [+]       │  │  ← ProgressControls
 │ └───────────────────────────────┘  │
 │ ┌───────────────────────────────┐  │
-│ │ 🖼️ Another Title              │  │
-│ │    [Anime] [Watching]         │  │
+│ │ 🖼️ Another Title          ⭐ │  │
+│ │    [Watching]  📺 Anime       │  │
 │ │    Ep. 12 / 24  •  2h ago     │  │
-│ │              [-] 12 [+]       │  │
 │ └───────────────────────────────┘  │
 ├─────────────────────────────────────┤
 │                          [+] FAB   │
@@ -91,13 +94,10 @@
 
 | Gesture | Action | Destination |
 |---------|--------|-------------|
-| Tap [+] on card | `repository.incrementProgress(id)` (atomic SQL) | — |
-| Tap [-] on card | `repository.decrementProgress(id)` (atomic SQL) | — |
-| Tap card body | Navigate to DetailScreen with item `id` | DetailScreen |
-| Long-press card | Context menu: Edit / Delete | DetailScreen / Delete dialog |
-| Tap category chip | Filter list (reactive via `flatMapLatest`) | — |
-| Tap status chip | Filter list by status | — |
-| Tap FAB [+] | Open AddItemSheet | AddItemSheet |
+| Tap card body | Navigate to UnifiedAddEditScreen (edit mode) with item `id` | UnifiedAddEditScreen |
+| Tap [Filter] | Open FilterBottomSheet (Modal): Category + Status selection | — |
+| Tap [Sort] | Open SortBottomSheet (Modal): Sort by + ASC/DESC | — |
+| Tap FAB [+] | Open UnifiedAddEditScreen (add mode) | UnifiedAddEditScreen |
 | Tap Settings ⚙️ | Navigate to SettingsScreen | SettingsScreen |
 
 **State**:
@@ -106,128 +106,73 @@ data class HomeUiState(
     val items: List<MediaItem> = emptyList(),
     val selectedCategory: MediaCategory? = null,  // null = All
     val selectedStatus: UserStatus? = null,        // null = All
+    val sortOrder: SortOrder = SortOrder.DATE_ADDED_DESC,
     val isLoading: Boolean = true
 )
+
+enum class SortOrder {
+    DATE_ADDED_DESC,    // Default — no teleporting
+    LAST_UPDATED_DESC,
+    TITLE_ASC,
+    PROGRESS_ASC
+}
 ```
 
+**FilterBottomSheet** (ModalBottomSheet):
+- Category section: [All] [Novels] [Manga] [Anime] [Games] [Movies] [TV]
+- Status section: [All] [Reading] [Watching] [Playing] [Completed] [On Hold] [Dropped] [Plan to]
+- [Clear Filters] button at bottom
+- Active filters shown as compact chips below TopAppBar
+
+**SortBottomSheet** (ModalBottomSheet):
+- Sort by: [Date Added] [Last Active] [Title] [Progress %]
+- Order: [↑ Ascending] [↓ Descending]
+- Current selection highlighted
+
 **Edge Cases**:
-- Empty list → `EmptyState` composable: "Nothing here yet. Tap + to add your first item."
-- Rapid [+] taps → atomic SQL `MIN(currentProgress + 1, totalItems)` — no debounce
-- Rapid card taps → 500ms debounce on `OpenItem` event channel
-- **Teleporting prevention**: List sorted by `dateAdded DESC` not `lastUpdated DESC` — tapping [+] does not move the card
+- Empty list + no filters → EmptyState: "Nothing here yet. Tap + to add your first item."
+- Empty list + filters active → EmptyState: "No items match your filters. [Clear Filters]"
+- Cards are READ-ONLY — no progress controls on cards. All editing via UnifiedAddEditScreen.
+- **Teleporting prevention**: Default sort by `dateAdded DESC` — no item jumps position on edit.
 
 ---
 
-### 3.2 AddItemSheet — Bottom Sheet
+### 3.2 UnifiedAddEditScreen — Full-Screen Form (Add + Edit modes)
 
-**Trigger**: FAB [+] from HomeScreen
+**Trigger**: FAB [+] (add mode) or Tap Card (edit mode) from HomeScreen
 
-```
-┌─────────────────────────────────────┐
-│  Add Media Item         [Cancel]    │  ← Sheet handle + toolbar
-├─────────────────────────────────────┤
-│                                     │
-│  URL                               │
-│  ┌─────────────────────────────┐    │
-│  │ https://novel.site.com/...  │    │
-│  └─────────────────────────────┘    │
-│  [🔍 Auto-fill]  ← triggers scrape │
-│                                     │
-│  ┌──────┬──────┬──────┬──────┐      │
-│  │Novel │Manga │Anime │Game  │      │  ← Category chips
-│  ├──────┼──────┼──────┼──────┤      │
-│  │Movie │ TV   │      │      │      │
-│  └──────┴──────┴──────┴──────┘      │
-│                                     │
-│  Title *                           │
-│  ┌─────────────────────────────┐    │
-│  │ Auto-filled or manual       │    │
-│  └─────────────────────────────┘    │
-│                                     │
-│  Cover Image URL                   │
-│  ┌─────────────────────────────┐    │
-│  │ https://cover.site.com/...  │    │
-│  └─────────────────────────────┘    │
-│                                     │
-│  Progress         Total            │
-│  ┌──────┐        ┌──────┐          │
-│  │  1   │        │ 100  │          │  ← Number keyboard
-│  └──────┘        └──────┘          │
-│                                     │
-│  Notes (optional)                  │
-│  ┌─────────────────────────────┐    │
-│  │                             │    │
-│  └─────────────────────────────┘    │
-│                                     │
-│  Status: [Reading] (auto-derived)   │  ← Read-only label
-│                                     │
-│  ┌─────────────────────────────┐    │
-│  │          + ADD              │    │  ← Primary button
-│  └─────────────────────────────┘    │
-└─────────────────────────────────────┘
-```
-
-**Flow States**:
-```
-IDLE ──► SCRAPING ──► AUTO-FILLED ──► VALIDATING ──► SAVING ──► DONE
-            │                              │
-            ▼                              ▼
-         ERROR                         VALIDATION ERROR
-      (inline message)              (inline message)
-```
-
-**Scrape Flow**:
-1. User enters URL → taps "Auto-fill"
-2. Loading spinner on button, form fields disabled
-3. `viewModelScope` launches `scraper.scrape(url)`
-4. **Success**: Title + Cover URL auto-filled, form re-enabled
-5. **Failure**: Inline error "Could not auto-fill, please enter manually", form re-enabled
-
-**Validation Rules**:
-
-| Field | Rule | Error Behavior |
-|-------|------|---------------|
-| Title | Required, non-empty after trim | Block save, show inline error |
-| Category | Must be selected (default: Novel) | — |
-| URL | Optional, must be HTTPS if provided | Block save if invalid |
-| Cover URL | Optional, must be valid http/https | Block save if invalid |
-| Progress | ≥ 0 (default 0), must be ≤ total if total set | Block save with "Progress cannot exceed total" |
-| Total | ≥ 0 if provided, null = unknown | — |
-| Duplicate URL | `repository.existsByUrl(normalizedUrl)` | Warning "This URL is already tracked" |
-
-**Status Derivation**: Status is auto-set based on category (read-only):
-- Novel/Manga → **Reading**
-- Anime/Movie/TV → **Watching**
-- Game → **Playing**
-
-**Safe Int Parsing**: Progress → `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`  
-Total → `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()`
-
-**Edge Cases**:
-- Dismiss during scrape → coroutine cancelled via `viewModelScope`
-- Rotation during scrape → ViewModel survives, loading state preserved via `StateFlow`
-- Scrape succeeds while user manually edited → don't overwrite manual edits
-- Double-tap Add → disabled after first tap, catch `DuplicateUrlException` → inline error
-
----
-
-### 3.3 DetailScreen — Inline Editing
-
-**Trigger**: Tap card body on HomeScreen, or Edit from long-press context menu
+Single screen handles both adding new items (empty fields, scrape available) and editing existing items (pre-filled from DB, delete button visible).
 
 ```
 ┌─────────────────────────────────────┐
-│ [←] Details               [🗑️]     │  ← TopAppBar with delete
+│ [←] Add Media / Edit Media [🗑️]    │  ← Delete only in edit mode
 ├─────────────────────────────────────┤
 │                                     │
 │       ┌───────────────────┐         │
-│       │   🖼️ Cover Image  │         │  ← Larger preview
-│       │   (async via Coil)│         │
+│       │  🖼️ Cover Image   │         │  ← Local file (downloaded)
+│       │  (local path,     │         │    Gradient+initials fallback
+│       │   Coil async)     │         │
 │       └───────────────────┘         │
 │                                     │
-│  Title                             │
+│  URL (scrape trigger)              │
 │  ┌─────────────────────────────┐    │
-│  │ Editable text field         │    │  ← Inline editable
+│  │ https://novel.site.com/...  │    │  ← Add mode only
+│  └─────────────────────────────┘    │
+│  [🔍 Auto-fill]  ← triggers scrape │
+│  (blocks: title, cover, alt titles, │
+│   category during scrape)           │
+│                                     │
+│  Title *                           │
+│  ┌─────────────────────────────┐    │
+│  │ Editable text field         │    │  ← Scrape fills this (blocked)
+│  └─────────────────────────────┘    │
+│                                     │
+│  Alternative Titles                │
+│  ┌─────────────────────────────┐    │  ← Dynamic list (0+ items)
+│  │ Alt Title 1           [↕]   │    │    [↕] = swap with main title
+│  │ Alt Title 2           [↕]   │    │    [×] = remove
+│  │ Alt Title 3           [↕]   │    │
+│  │ [+ Add Alternative Title]   │    │
 │  └─────────────────────────────┘    │
 │                                     │
 │  Category                          │
@@ -239,20 +184,25 @@ Total → `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX
 │                                     │
 │  Status                            │
 │  ┌────────┬────────┬────────┐       │
-│  │Watching│Completed│On Hold │       │  ← Context-adaptive chips
-│  ├────────┼────────┼────────┤       │    (category-aware)
+│  │Reading │Completed│On Hold │       │  ← Category-adaptive chips
+│  ├────────┼────────┼────────┤       │    (editable, defaults to smart value)
 │  │ Dropped│Plan to │        │       │
 │  └────────┴────────┴────────┘       │
 │                                     │
+│  Rating                             │
+│  ┌─────────────────────────────┐    │
+│  │ ⭐ ⭐ ⭐ ⭐ ⭐  4.5/5.0      │    │  ← Tappable stars (half-star)
+│  └─────────────────────────────┘    │
+│                                     │
 │  Progress         Total            │
 │  ┌──────┐        ┌──────┐          │
-│  │  42  │        │ 100  │          │  ← Editable, Number keyboard
+│  │  42  │        │ 100  │          │  ← Number keyboard
 │  └──────┘        └──────┘          │
-│  (Capped to 100)                   │  ← Clamp hint on blur
+│  ⚠ Progress cannot exceed total    │  ← Red error text if progress > total
 │                                     │
 │  Notes                             │
 │  ┌─────────────────────────────┐    │
-│  │ Editable notes field        │    │
+│  │ Editable text field         │    │
 │  └─────────────────────────────┘    │
 │                                     │
 │  Source URL                        │
@@ -262,50 +212,105 @@ Total → `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX
 │  [🌐 Open URL]  ← launches browser │
 │                                     │
 │  ┌─────────────────────────────┐    │
-│  │          SAVE               │    │  ← Primary button
+│  │          SAVE               │    │  ← Disabled if validation fails
 │  └─────────────────────────────┘    │
 └─────────────────────────────────────┘
 ```
 
-**Data Flow**:
+**Flow States**:
 ```
-DetailScreen (id nav arg)
+IDLE ──► SCRAPING ──► AUTO-FILLED ──► VALIDATING ──► SAVING ──► DONE (pop back)
+            │                              │
+            ▼                              ▼
+         ERROR                         VALIDATION ERROR
+      (inline message)              (inline field errors)
+```
+
+**Scrape Flow** (Add mode only):
+1. User enters URL → taps "Auto-fill"
+2. **Blocked during scrape**: Title, Cover Image, Alternative Titles, Category fields show spinner
+3. **Active during scrape**: Progress, Total, Status, Notes, Rating remain editable
+4. Success → scraped values filled into blocked fields. If user already typed in a field and scrape finds different info → replaced with scraped value. If scrape finds nothing → user's text preserved.
+5. Auto-detect: if progress = total → auto-set status to Completed
+6. Failure → inline error "Could not auto-fill, please enter manually", blocked fields re-enabled
+
+**Cover Image Logic**:
+- Scraper downloads cover image to `{appInternalDir}/covers/{itemId}.{ext}`
+- `coverImagePath` stored in Room (no URL saved)
+- If download fails → user provides direct URL → download saved locally
+- Fallback display: gradient background + category icon + first letter of title
+
+**Alternative Titles UI**:
+- Stored as JSON array in single Room column: `["Alt Title 1", "Alt Title 2", ...]`
+- Displayed as list with: [↕] swap button, [×] remove button, [+ Add] button
+- Tap [↕] on any alt title → it becomes main title, old main title moves to alt list position 1
+- Scrape fills alt titles from page metadata
+
+**Rating UI**:
+- 5 tappable stars (filled/half/empty)
+- Half-star precision (0.5 increments)
+- Numerical display: "4.5/5.0"
+- Rating color interpolated: 1=red → 3=yellow → 5=green
+
+**Validation Rules**:
+
+| Field | Rule | Error Behavior |
+|-------|------|---------------|
+| Title | Required, non-empty after trim | Block save, show inline error |
+| Category | Must be selected (default: Novel) | — |
+| URL | Optional, must be HTTPS if provided | Block save if invalid |
+| Progress | ≥ 0, must be ≤ total if total set | Red error text, **Save disabled** |
+| Total | ≥ 0 if provided, null = unknown | — |
+| Rating | 1.0–5.0, optional (null = unrated) | — |
+| Similar title | Check if main/alt title matches existing item | Warning: "Similar title exists" |
+
+**Status Derivation** (smart default, fully editable):
+- Novel/Manga → **Reading**
+- Anime/Movie/TV → **Watching**
+- Game → **Playing**
+
+**Safe Int Parsing**: Progress → `text.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0`  
+Total → `text.takeIf { it.isNotBlank() }?.toLongOrNull()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()`
+
+**Data Flow** (Edit mode):
+```
+Screen receives itemId nav arg (or none for add mode)
     │
     ▼
-DetailViewModel
-    ├── savedStateHandle.toRoute<DetailRoute>().id
-    │
-    ├── repository.observeById(id).take(1)   ← read once to initialize
+ViewModel
+    ├── If edit mode: repository.observeById(id).take(1) → initialize draft MutableStateFlow
+    ├── If add mode: empty draft MutableStateFlow
     │       ▼
-    ├── MutableStateFlow<MediaItem>(draft state)  ← independent of Room re-emissions
-    │       ▼
-    ├── UI binds to draft state
+    ├── UI binds to draft state (independent of Room re-emissions)
     │
-    └── on Save → repository.update(normalized)
+    ├── on Save → item.copy(lastUpdated = now, 
+    │       coverImagePath = downloadIfNeeded(...)
+    │   ).normalize()
+    │       → if add: repository.add(item)
+    │       → if edit: repository.update(item)
+    │
+    └── on Delete → confirmation dialog → repository.delete(id) → pop to Home
 ```
 
 **Interactions**:
 
 | Action | Behavior |
 |--------|----------|
-| Edit title, category, progress, total, notes, URL | Changes reflected in local draft state |
-| Change category | Status auto-remaps: READING↔WATCHING↔PLAYING based on new category |
-| Tap Save | `repository.update(item.copy(lastUpdated = now).normalize())` |
-| Tap Delete | Confirmation dialog: "Delete 'Title'? This cannot be undone." → `repository.delete(id)` → pop back |
+| Edit any field | Changes reflected in local draft state |
+| Change category | Status auto-remaps: READING↔WATCHING↔PLAYING based on new category (in-progress only) |
+| Progress > total | Red error text: "Progress cannot exceed total (N)". Save button disabled until fixed. |
+| Tap Save | `repository.update(item.copy(lastUpdated = now).normalize())` (or `repository.add(...)` for new) |
+| Tap Delete (edit only) | Confirmation dialog: "Delete 'Title'? This cannot be undone." → `repository.delete(id)` → pop back |
 | Tap Open URL | `Intent.ACTION_VIEW` with try/catch for `ActivityNotFoundException` |
-| Edit sourceUrl to duplicate | `DuplicateUrlException` caught → inline error "This URL is already tracked" |
-| Back press | Discard unsaved changes (no confirmation — v1 simplicity) |
-
-**Progress Clamping** (Dual Strategy):
-- **Client-side**: On blur, cap progress field to `totalItems`, show inline hint "Capped to N"
-- **ViewModel-side**: On save, if clamp was needed, emit snackbar event "Progress capped to N"
-- **Repository-side**: `normalize()` always clamps — authoritative enforcement
+| Back press + unsaved changes | Discard confirmation dialog: "Discard unsaved changes? [Keep Editing] [Discard]" |
 
 **Edge Cases**:
-- Item deleted externally (other screen) → `observeById` emits null → `ItemDeletedExternally` event → pop back
+- Item deleted externally → `observeById` emits null → navigate back
 - Two screens editing same item → last save wins (no optimistic locking for v1)
 - Blank title on save → ViewModel blocks with inline error
 - Progress > Int.MAX_VALUE → safe parsing prevents crash
+- Scrape in progress + screen dismissed → coroutine cancelled via viewModelScope
+- Add mode + no URL → manual entry only, no scrape triggered
 
 ---
 
@@ -403,6 +408,10 @@ Tap Import
 // All results normalized before persist
 ```
 
+**Overwrite Safety**: Press-and-hold the confirmation button for 5–10 seconds to execute destructive overwrite.
+
+**Auto-Backup Directory**: When user selects a backup schedule, SAF folder picker (`ACTION_OPEN_DOCUMENT_TREE`) opens → user selects destination folder → URI persisted via `takePersistableUriPermission` → displayed in Settings UI.
+
 **Edge Cases**:
 - Empty backup file → "Backup file contains no valid items" error
 - Corrupted JSON → error dialog "Backup file appears corrupted"
@@ -412,6 +421,7 @@ Tap Import
 - Export to full storage → toast "Could not save backup. Check storage space."
 - No browser installed → Toast "No web browser found"
 - Auto-backup temp file collision → unique UUID-based temp filenames
+- Auto-backup retention: keep last 30 files, delete older
 
 ---
 
@@ -419,13 +429,14 @@ Tap Import
 
 | Component | Purpose | Inputs |
 |-----------|---------|--------|
-| `MediaCard` | List item card | `item: MediaItem`, `onIncrement`, `onDecrement`, `onTap`, `onLongClick` |
-| `CategoryFilterChips` | Filter row | `selected: MediaCategory?`, `onSelect: (MediaCategory?)` |
-| `StatusFilterChips` | Status filter row | `selected: UserStatus?`, `onSelect: (UserStatus?)` |
-| `CategoryBadge` | Color-coded category | `category: MediaCategory` |
-| `StatusBadge` | Color-coded status | `status: UserStatus` |
-| `ProgressControls` | [-] N [+] row | `current: Int, total: Int?, onInc, onDec` |
-| `EmptyState` | Placeholder | `message: String`, `actionLabel: String?`, `onAction` |
+| `MediaCard` | List item card (READ-ONLY) | `item: MediaItem`, `onTap` |
+| `FilterBottomSheet` | Category + status filter bottom sheet | `selectedCategory`, `selectedStatus`, `onApply` |
+| `SortBottomSheet` | Sort options bottom sheet | `currentSort`, `onApply` |
+| `CategoryBadge` | Outline + icon badge | `category: MediaCategory` |
+| `StatusBadge` | Color-filled status pill | `status: UserStatus` |
+| `StarRating` | Tappable star rating (1.0–5.0) | `rating: Double?`, `onChange`, `interactive: Boolean` |
+| `AltTitleEditor` | Dynamic alt title list with swap/remove/add | `titles: List<String>`, `mainTitle: String`, `onSwap`, `onAdd`, `onRemove` |
+| `EmptyState` | Filter-aware placeholder | `message: String`, `actionLabel: String?`, `onAction`, `isFiltered: Boolean` |
 
 ---
 
@@ -453,11 +464,39 @@ LazyDexTheme(
 MaterialTheme(colorScheme = finalScheme, typography, shapes)
 ```
 
-**Category Colors**: Novel=Blue, Manga=Green, Anime=Red, Game=Purple, Movie=Orange, TV=Teal  
-**Status Colors**: InProgress=Blue, Completed=Green, OnHold=Yellow, Dropped=Red, PlanTo=Gray  
-**Badge Backgrounds**: `color.copy(alpha = 0.15f)`
+**Color Strategy**: Status gets color badges. Category gets neutral outline + Material icon (e.g., 📖 Novel, 🎮 Game, 🎬 Movie).
 
-**First Launch**: Dark theme (default). User can switch to System or Light in Settings.
+**Status Colors** (reserved for status only):
+| Status | Color |
+|--------|-------|
+| In Progress (Reading/Watching/Playing) | `#5795d9` (primary blue) |
+| Completed | `#22c55e` (green) |
+| On Hold | `#eab308` (yellow) |
+| Dropped | `#ef4444` (red) |
+| Plan to | `#6b7280` (gray) |
+
+**Category Representation** (neutral outline + icon, no color fill):
+| Category | Icon |
+|----------|------|
+| Novel | Book icon |
+| Manga | Book icon |
+| Anime | TV icon |
+| Game | Gamepad icon |
+| Movie | Film icon |
+| TV | TV icon |
+
+**Rating Colors** (1.0–5.0 scale):
+| Rating | Color |
+|--------|-------|
+| 5.0 | `#22c55e` |
+| 4.0 | `#84cc16` |
+| 3.0 | `#eab308` |
+| 2.0 | `#f97316` |
+| 1.0 | `#ef4444` |
+
+**Badge Backgrounds**: `color.copy(alpha = 0.15f)` for status pills.
+
+**First Launch**: Dark theme (default) with WTR-LAB palette (`#1b1d23` background, `#1f2129` cards, `#5795d9` primary, `#fd7e14` accent). See `DESIGN.md` for full theme mapping.
 
 ---
 
@@ -465,17 +504,19 @@ MaterialTheme(colorScheme = finalScheme, typography, shapes)
 
 | Layer | Error | UX Treatment |
 |-------|-------|-------------|
-| Add | Duplicate URL | Inline warning below URL field |
-| Add | Scrape failure | Inline error below URL field |
-| Add | Validation | Inline field-level errors |
-| Add | DB constraint | `DuplicateUrlException` → inline error |
-| Detail | Duplicate URL on save | Inline error below URL field |
-| Detail | Blank title | Inline error "Title is required" |
-| Detail | Progress clamped on save | Snackbar "Progress capped to N" |
-| Detail | Item deleted externally | Auto-navigate back to Home |
+| Add/Edit | Similar title detected | Inline warning: "Similar title already exists" |
+| Add/Edit | Scrape failure | Inline error below URL field |
+| Add/Edit | Validation | Inline field-level errors |
+| Add/Edit | Blank title | Inline error "Title is required" |
+| Add/Edit | Progress > total | Red error text, Save disabled |
+| Add/Edit | DB constraint on add | Error inline "Failed to save" |
+| Add/Edit | Item deleted externally | Auto-navigate back to Home |
+| Add/Edit | Discard unsaved changes | Confirmation dialog: "Discard changes?" |
+| Add/Edit | Delete | Confirmation dialog before deletion |
 | Settings | Export failure | Error toast |
 | Settings | Import failure | Error dialog |
 | Settings | Corrupt/empty backup | Error dialog |
+| Settings | Overwrite import | Press-and-hold 5–10s to confirm |
 | Global | DB corruption | Error screen with "Reset Database" button |
 | Global | No browser | Toast "No web browser found" |
 | Global | Strings | Via `strings.xml` + `UiText` sealed interface |
@@ -492,16 +533,24 @@ MaterialTheme(colorScheme = finalScheme, typography, shapes)
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "category": "NOVEL",
             "title": "Example Novel",
+            "alternativeTitles": ["Alt Title 1", "Alt Title 2"],
             "sourceUrl": "https://novel.site.com/example",
-            "coverImageUrl": "https://cdn.site.com/cover.jpg",
             "currentProgress": 42,
             "totalItems": 100,
             "userStatus": "READING",
+            "rating": 4.5,
             "notes": "My reading notes",
-            "lastUpdated": 1700000000000
+            "lastUpdated": 1700000000000,
+            "dateAdded": 1700000000000
         }
     ]
 }
 ```
+
+**New fields vs original**:
+- `alternativeTitles`: JSON array (flexible list, not limited to 2)
+- `rating`: 1.0–5.0 stars (nullable = unrated)
+- `dateAdded`: Timestamp for stable sort order (no teleporting)
+- `coverImageUrl` removed (covers stored as local files, not URLs)
 
 **Robustness**: Missing/invalid fields handled gracefully — missing schemaVersion defaults to 1, missing title rejects item, bad status defaults to category-appropriate status, negative progress clamped to 0, missing lastUpdated → epoch 0 (local wins in merge).
