@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.stateIn
 
 data class DexUiState(
     val items: List<MediaItem> = emptyList(),
+    val totalCount: Int = 0,
     val selectedCategory: MediaCategory? = null,
     val selectedStatus: StatusFilter = StatusFilter.ALL,
     val sortField: SortField = SortField.DATE_ADDED,
@@ -34,18 +35,21 @@ class DexViewModel(
     private val selectedStatus = MutableStateFlow<StatusFilter>(StatusFilter.ALL)
     private val sortField = MutableStateFlow<SortField>(SortField.DATE_ADDED)
     private val sortDirection = MutableStateFlow<SortDirection>(SortDirection.DESCENDING)
-    private val isLoading = MutableStateFlow(true)
+
+    private val filteredItems: StateFlow<List<MediaItem>> = selectedCategory
+        .flatMapLatest { cat ->
+            selectedStatus.flatMapLatest { stat ->
+                repository.observeFiltered(cat, stat)
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val uiState: StateFlow<DexUiState> = combine(
         selectedCategory,
         selectedStatus,
         sortField,
         sortDirection,
-        selectedCategory.flatMapLatest { cat ->
-            selectedStatus.flatMapLatest { stat ->
-                repository.observeFiltered(cat, stat)
-            }
-        }
+        filteredItems
     ) { category, status, field, direction, items ->
         val sorted = sortItems(items, field, direction)
         DexUiState(
@@ -56,6 +60,10 @@ class DexViewModel(
             sortDirection = direction,
             isLoading = false
         )
+    }.combine(
+        repository.observeCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    ) { state, count ->
+        state.copy(totalCount = count)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),

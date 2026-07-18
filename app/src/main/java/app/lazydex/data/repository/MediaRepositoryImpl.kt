@@ -53,6 +53,8 @@ class MediaRepositoryImpl(
         .map { it?.toDomain() }
         .distinctUntilChanged()
 
+    override fun observeCount(): Flow<Int> = dao.observeCount().distinctUntilChanged()
+
     override fun observeStats(): Flow<MediaStats> = dao.getStats().distinctUntilChanged()
 
     override suspend fun getById(id: String): MediaItem? = withContext(Dispatchers.IO) {
