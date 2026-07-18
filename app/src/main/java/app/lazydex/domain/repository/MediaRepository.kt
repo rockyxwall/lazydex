@@ -4,6 +4,7 @@ import app.lazydex.domain.model.MediaCategory
 import app.lazydex.domain.model.MediaItem
 import app.lazydex.domain.model.StatusFilter
 import app.lazydex.domain.model.UserStatus
+import app.lazydex.domain.model.MediaStats
 import kotlinx.coroutines.flow.Flow
 
 interface MediaRepository {
@@ -12,6 +13,7 @@ interface MediaRepository {
     fun observeByCategory(category: MediaCategory): Flow<List<MediaItem>>
     fun observeFiltered(category: MediaCategory?, statusFilter: StatusFilter): Flow<List<MediaItem>>
     fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for UnifiedAddEditViewModel
+    fun observeStats(): Flow<MediaStats>
 
     /** One-shot reads */
     suspend fun getById(id: String): MediaItem?

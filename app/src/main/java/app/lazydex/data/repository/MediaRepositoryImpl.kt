@@ -6,6 +6,7 @@ import app.lazydex.data.local.dao.MediaItemDao
 import app.lazydex.data.local.entity.MediaItemEntity
 import app.lazydex.domain.model.MediaCategory
 import app.lazydex.domain.model.MediaItem
+import app.lazydex.domain.model.MediaStats
 import app.lazydex.domain.model.StatusFilter
 import app.lazydex.domain.model.UserStatus
 import app.lazydex.domain.repository.DuplicateUrlException
@@ -51,6 +52,8 @@ class MediaRepositoryImpl(
     override fun observeById(id: String): Flow<MediaItem?> = dao.observeById(id)
         .map { it?.toDomain() }
         .distinctUntilChanged()
+
+    override fun observeStats(): Flow<MediaStats> = dao.getStats().distinctUntilChanged()
 
     override suspend fun getById(id: String): MediaItem? = withContext(Dispatchers.IO) {
         dao.getById(id)?.toDomain()

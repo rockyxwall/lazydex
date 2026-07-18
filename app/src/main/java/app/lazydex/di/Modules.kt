@@ -11,6 +11,7 @@ import app.lazydex.scraper.MetadataScraper
 import app.lazydex.scraper.SafeDns
 import app.lazydex.ui.addedit.UnifiedAddEditViewModel
 import app.lazydex.ui.home.HomeViewModel
+import app.lazydex.ui.home.StatisticsViewModel
 import app.lazydex.ui.settings.SettingsViewModel
 import okhttp3.OkHttpClient
 import org.koin.android.ext.koin.androidContext
@@ -75,6 +76,7 @@ val storageModule = module {
 
 val viewModelModule = module {
     viewModel { HomeViewModel(get()) }
+    viewModel { StatisticsViewModel(get()) }
     viewModel {
         UnifiedAddEditViewModel(
             savedStateHandle = get(),

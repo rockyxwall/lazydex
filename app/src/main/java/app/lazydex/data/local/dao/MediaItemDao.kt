@@ -5,6 +5,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
 import app.lazydex.data.local.entity.MediaItemEntity
+import app.lazydex.domain.model.MediaStats
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -111,4 +112,18 @@ interface MediaItemDao {
         deleteAll()
         upsertAll(items)
     }
+
+    @Query("""
+        SELECT 
+          (SELECT COUNT(*) FROM media_items) as totalCount,
+          (SELECT COUNT(*) FROM media_items WHERE userStatus = 'COMPLETED') as completedCount,
+          (SELECT COALESCE(SUM(currentProgress), 0) FROM media_items) as totalProgress,
+          (SELECT AVG(rating) FROM media_items WHERE rating IS NOT NULL) as meanRating,
+          (SELECT COUNT(*) FROM media_items WHERE userStatus IN ('READING', 'WATCHING', 'PLAYING')) as inProgressCount,
+          (SELECT COUNT(*) FROM media_items WHERE category = 'NOVEL') as novelCount,
+          (SELECT COUNT(*) FROM media_items WHERE category = 'MANGA') as mangaCount,
+          (SELECT COUNT(*) FROM media_items WHERE category = 'ANIME') as animeCount,
+          (SELECT COUNT(*) FROM media_items WHERE category = 'GAME') as gameCount
+    """)
+    fun getStats(): Flow<MediaStats>
 }

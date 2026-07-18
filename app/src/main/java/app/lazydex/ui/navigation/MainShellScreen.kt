@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import app.lazydex.ui.home.HomeScreen
+import app.lazydex.ui.home.StatisticsScreen
 
 enum class ShellTab {
     DEX, STATISTICS, MORE
@@ -89,12 +90,9 @@ fun MainShellScreen(
                     )
                 }
                 ShellTab.STATISTICS -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(text = "Statistics Screen Placeholder")
-                    }
+                    StatisticsScreen(
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
                 ShellTab.MORE -> {
                     Box(
