@@ -3,6 +3,7 @@ package app.lazydex.ui.addedit
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,17 +16,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,12 +44,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.lazydex.domain.model.MediaCategory
@@ -53,7 +66,27 @@ import app.lazydex.domain.model.UserStatus
 import app.lazydex.ui.components.AltTitleEditor
 import app.lazydex.ui.components.CoverImage
 import app.lazydex.ui.components.StarRating
+import coil3.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.koin.androidx.compose.koinViewModel
+
+// Helper for lightweight bitmap average color extraction
+fun extractAverageColor(imagePath: String): Color? {
+    if (imagePath.isEmpty()) return null
+    val file = java.io.File(imagePath)
+    if (!file.exists()) return null
+    return try {
+        val bitmap = android.graphics.BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val scaled = android.graphics.Bitmap.createScaledBitmap(bitmap, 1, 1, true)
+        val pixel = scaled.getPixel(0, 0)
+        scaled.recycle()
+        bitmap.recycle()
+        Color(pixel)
+    } catch (e: Exception) {
+        null
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,6 +99,22 @@ fun UnifiedAddEditScreen(
     val state by viewModel.formState.collectAsState()
     val scrollState = rememberScrollState()
     val context = LocalContext.current
+
+    var dominantColor by remember { mutableStateOf<Color?>(null) }
+
+    // Dynamic color extraction on cover art updates
+    LaunchedEffect(state.coverImagePath) {
+        if (state.coverImagePath.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                val color = extractAverageColor(state.coverImagePath)
+                withContext(Dispatchers.Main) {
+                    dominantColor = color
+                }
+            }
+        } else {
+            dominantColor = null
+        }
+    }
 
     // Trigger back pop when save/delete is complete
     LaunchedEffect(state.isDone) {
@@ -82,383 +131,493 @@ fun UnifiedAddEditScreen(
     }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = if (state.isNew) "Add Media" else "Edit Media",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
-                    )
-                },
-                navigationIcon = {
-                    IconButton(
-                        onClick = {
-                            if (viewModel.checkBackPressAllowed()) {
-                                onBack()
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Go back"
-                        )
-                    }
-                },
-                actions = {
-                    if (!state.isNew) {
-                        IconButton(onClick = { viewModel.showDeleteConfirm(true) }) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "Delete item",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
-            )
-        },
         containerColor = MaterialTheme.colorScheme.background,
         modifier = modifier
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(scrollState)
         ) {
-            // Error Message (database constraints, etc.)
-            state.errorMsg?.let { error ->
-                Text(
-                    text = error,
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-            }
-
-            // URL Scraping block (Visible only in Add Mode)
-            if (state.isNew) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+            // ==================== SCROLLABLE CONTENT COLUMN ====================
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+            ) {
+                // ==================== DYNAMIC BLURRED HEADER CONTAINER ====================
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(250.dp)
                 ) {
-                    OutlinedTextField(
-                        value = state.sourceUrl,
-                        onValueChange = { viewModel.updateSourceUrl(it) },
-                        label = { Text("Import URL (Auto-fill)", fontSize = 12.sp) },
-                        placeholder = { Text("https://...", fontSize = 12.sp) },
-                        singleLine = true,
-                        isError = state.isUrlInvalid,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedButton(
-                        onClick = { viewModel.scrapeUrl() },
-                        enabled = state.sourceUrl.isNotEmpty() && !state.isScraping && !state.isUrlInvalid,
-                        modifier = Modifier.height(56.dp)
-                    ) {
-                        if (state.isScraping) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp
+                    if (state.coverImagePath.isNotEmpty() && java.io.File(state.coverImagePath).exists()) {
+                        AsyncImage(
+                            model = java.io.File(state.coverImagePath),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .blur(24.dp)
+                                .alpha(0.35f)
+                        )
+                    } else {
+                        val fallbackColor = dominantColor ?: MaterialTheme.colorScheme.primary
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(fallbackColor.copy(alpha = 0.25f), Color.Transparent)
+                                    )
+                                )
+                        )
+                    }
+
+                    // Bottom background fade gradient
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, MaterialTheme.colorScheme.background),
+                                    startY = 120f
+                                )
                             )
-                        } else {
-                            Text("Fetch", fontSize = 13.sp)
+                    )
+
+                    // Foreground Cover Art & Titles
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 20.dp),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        CoverImage(
+                            coverImagePath = state.coverImagePath,
+                            title = state.title,
+                            modifier = Modifier
+                                .size(width = 90.dp, height = 125.dp)
+                                .shadow(6.dp, RoundedCornerShape(8.dp))
+                        )
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.Bottom
+                        ) {
+                            Text(
+                                text = state.title.ifEmpty { "New Media" },
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = state.category.displayName,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = state.userStatus.displayName,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = dominantColor ?: MaterialTheme.colorScheme.primary
+                            )
                         }
                     }
                 }
-                
-                state.scrapeError?.let { err ->
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Scrape error: $err",
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            // Cover Image details
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                CoverImage(
-                    coverImagePath = state.coverImagePath,
-                    title = state.title,
-                    modifier = Modifier.size(width = 80.dp, height = 110.dp)
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                // ==================== FORM ITEMS CONTAINER ====================
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                ) {
+                    // Error Message
+                    state.errorMsg?.let { error ->
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                    }
+
+                    // URL Scraping block (Visible only in Add Mode)
+                    if (state.isNew) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = state.sourceUrl,
+                                onValueChange = { viewModel.updateSourceUrl(it) },
+                                label = { Text("Import URL (Auto-fill)", fontSize = 12.sp) },
+                                placeholder = { Text("https://...", fontSize = 12.sp) },
+                                singleLine = true,
+                                isError = state.isUrlInvalid,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = { viewModel.scrapeUrl() },
+                                enabled = state.sourceUrl.isNotEmpty() && !state.isScraping && !state.isUrlInvalid,
+                                modifier = Modifier.height(56.dp)
+                            ) {
+                                if (state.isScraping) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Text("Fetch", fontSize = 13.sp)
+                                }
+                            }
+                        }
+
+                        state.scrapeError?.let { err ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Scrape error: $err",
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+
+                    // Cover image URL text input
                     OutlinedTextField(
-                        value = state.coverImageUrl,
+                        value = state.coverImageUrl ?: "",
                         onValueChange = { viewModel.updateCoverImageUrl(it) },
                         label = { Text("Cover Image URL", fontSize = 12.sp) },
                         placeholder = { Text("https://...", fontSize = 12.sp) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                }
-            }
 
-            Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-            // Title Field (Required)
-            OutlinedTextField(
-                value = state.title,
-                onValueChange = { viewModel.updateTitle(it) },
-                label = { Text("Title *", fontSize = 12.sp) },
-                singleLine = true,
-                isError = state.isTitleBlank,
-                modifier = Modifier.fillMaxWidth(),
-                supportingText = {
-                    if (state.isTitleBlank) {
-                        Text("Title is required", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Alternative Titles editor
-            AltTitleEditor(
-                mainTitle = state.title,
-                alternativeTitles = state.alternativeTitles,
-                onMainTitleChanged = { viewModel.updateTitle(it) },
-                onAltTitlesChanged = { viewModel.updateAltTitles(it) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Category Selection Chips
-            Text(
-                text = "Category",
-                style = MaterialTheme.typography.titleMedium,
-                fontSize = 14.sp
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                // Wrap chips nicely in a row
-                MediaCategory.entries.take(3).forEach { category ->
-                    FilterChip(
-                        selected = state.category == category,
-                        onClick = { viewModel.updateCategory(category) },
-                        label = { Text(category.displayName, fontSize = 11.sp) }
-                    )
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                MediaCategory.entries.drop(3).forEach { category ->
-                    FilterChip(
-                        selected = state.category == category,
-                        onClick = { viewModel.updateCategory(category) },
-                        label = { Text(category.displayName, fontSize = 11.sp) }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Status Selection Chips (Category-Adaptive)
-            Text(
-                text = "Status",
-                style = MaterialTheme.typography.titleMedium,
-                fontSize = 14.sp
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            val adaptiveStatusOptions = remember(state.category) {
-                val primaryLabel = when (state.category) {
-                    MediaCategory.NOVEL, MediaCategory.MANGA -> UserStatus.READING
-                    MediaCategory.ANIME, MediaCategory.MOVIE, MediaCategory.TV -> UserStatus.WATCHING
-                    MediaCategory.GAME -> UserStatus.PLAYING
-                }
-                listOf(primaryLabel, UserStatus.COMPLETED, UserStatus.ON_HOLD, UserStatus.DROPPED, UserStatus.PLAN_TO)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                adaptiveStatusOptions.take(3).forEach { status ->
-                    FilterChip(
-                        selected = state.userStatus == status,
-                        onClick = { viewModel.updateStatus(status) },
-                        label = { Text(status.displayName, fontSize = 11.sp) }
-                    )
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                adaptiveStatusOptions.drop(3).forEach { status ->
-                    FilterChip(
-                        selected = state.userStatus == status,
-                        onClick = { viewModel.updateStatus(status) },
-                        label = { Text(status.displayName, fontSize = 11.sp) }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Progress / Total numbers
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedTextField(
-                    value = state.currentProgress,
-                    onValueChange = { viewModel.updateProgress(it) },
-                    label = { Text("Current Progress", fontSize = 12.sp) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    isError = state.isProgressInvalid,
-                    modifier = Modifier.weight(1f)
-                )
-
-                OutlinedTextField(
-                    value = state.totalItems,
-                    onValueChange = { viewModel.updateTotal(it) },
-                    label = { Text("Total Items", fontSize = 12.sp) },
-                    placeholder = { Text("Ongoing", fontSize = 12.sp) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    isError = state.isTotalInvalid,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            // Inline progress error reporting
-            if (state.isProgressInvalid) {
-                val errTxt = when {
-                    (state.parsedProgress ?: 0) < 0 -> "Progress cannot be negative"
-                    state.parsedTotal != null && (state.parsedProgress ?: 0) > (state.parsedTotal ?: 0) -> "Progress cannot exceed total items"
-                    else -> "Invalid progress input"
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = errTxt,
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Star Rating (Editable)
-            Text(
-                text = "My Rating",
-                style = MaterialTheme.typography.titleMedium,
-                fontSize = 14.sp
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            StarRating(
-                rating = state.rating,
-                isEditable = true,
-                onRatingChanged = { viewModel.updateRating(it) }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Notes field
-            OutlinedTextField(
-                value = state.notes,
-                onValueChange = { viewModel.updateNotes(it) },
-                label = { Text("Notes", fontSize = 12.sp) },
-                minLines = 3,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Source URL & Open Link (Visible in Edit Mode, or Add Mode if manual entry)
-            if (!state.isNew && state.sourceUrl.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                    // Title Field (Required)
                     OutlinedTextField(
-                        value = state.sourceUrl,
-                        onValueChange = { viewModel.updateSourceUrl(it) },
-                        label = { Text("Source URL", fontSize = 12.sp) },
+                        value = state.title,
+                        onValueChange = { viewModel.updateTitle(it) },
+                        label = { Text("Title *", fontSize = 12.sp) },
                         singleLine = true,
-                        isError = state.isUrlInvalid,
-                        modifier = Modifier.weight(1f)
+                        isError = state.isTitleBlank,
+                        modifier = Modifier.fillMaxWidth(),
+                        supportingText = {
+                            if (state.isTitleBlank) {
+                                Text("Title is required", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    IconButton(
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.sourceUrl))
-                            context.startActivity(intent)
-                        },
-                        enabled = !state.isUrlInvalid,
-                        modifier = Modifier.size(56.dp)
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Alternative Titles editor
+                    AltTitleEditor(
+                        mainTitle = state.title,
+                        alternativeTitles = state.alternativeTitles,
+                        onMainTitleChanged = { viewModel.updateTitle(it) },
+                        onAltTitlesChanged = { viewModel.updateAltTitles(it) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Category Selection Chips
+                    Text(
+                        text = "Category",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    
+                    val chipColors = if (dominantColor != null) {
+                        FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = dominantColor!!.copy(alpha = 0.25f),
+                            selectedLabelColor = dominantColor!!
+                        )
+                    } else {
+                        FilterChipDefaults.filterChipColors()
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.OpenInNew,
-                            contentDescription = "Open in browser",
-                            tint = MaterialTheme.colorScheme.primary
+                        MediaCategory.entries.take(3).forEach { category ->
+                            FilterChip(
+                                selected = state.category == category,
+                                onClick = { viewModel.updateCategory(category) },
+                                label = { Text(category.displayName, fontSize = 11.sp) },
+                                colors = chipColors
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        MediaCategory.entries.drop(3).forEach { category ->
+                            FilterChip(
+                                selected = state.category == category,
+                                onClick = { viewModel.updateCategory(category) },
+                                label = { Text(category.displayName, fontSize = 11.sp) },
+                                colors = chipColors
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Status Selection Chips (Category-Adaptive)
+                    Text(
+                        text = "Status",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val adaptiveStatusOptions = remember(state.category) {
+                        val primaryLabel = when (state.category) {
+                            MediaCategory.NOVEL, MediaCategory.MANGA -> UserStatus.READING
+                            MediaCategory.ANIME, MediaCategory.MOVIE, MediaCategory.TV -> UserStatus.WATCHING
+                            MediaCategory.GAME -> UserStatus.PLAYING
+                        }
+                        listOf(primaryLabel, UserStatus.COMPLETED, UserStatus.ON_HOLD, UserStatus.DROPPED, UserStatus.PLAN_TO)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        adaptiveStatusOptions.take(3).forEach { status ->
+                            FilterChip(
+                                selected = state.userStatus == status,
+                                onClick = { viewModel.updateStatus(status) },
+                                label = { Text(status.displayName, fontSize = 11.sp) },
+                                colors = chipColors
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        adaptiveStatusOptions.drop(3).forEach { status ->
+                            FilterChip(
+                                selected = state.userStatus == status,
+                                onClick = { viewModel.updateStatus(status) },
+                                label = { Text(status.displayName, fontSize = 11.sp) },
+                                colors = chipColors
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Progress / Total numbers
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = state.currentProgress,
+                            onValueChange = { viewModel.updateProgress(it) },
+                            label = { Text("Current Progress", fontSize = 12.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            isError = state.isProgressInvalid,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        OutlinedTextField(
+                            value = state.totalItems,
+                            onValueChange = { viewModel.updateTotal(it) },
+                            label = { Text("Total Items", fontSize = 12.sp) },
+                            placeholder = { Text("Ongoing", fontSize = 12.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            isError = state.isTotalInvalid,
+                            modifier = Modifier.weight(1f)
                         )
                     }
-                }
-                Spacer(modifier = Modifier.height(20.dp))
-            } else if (!state.isNew) {
-                OutlinedTextField(
-                    value = state.sourceUrl,
-                    onValueChange = { viewModel.updateSourceUrl(it) },
-                    label = { Text("Source URL", fontSize = 12.sp) },
-                    singleLine = true,
-                    isError = state.isUrlInvalid,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-            }
 
-            // Save Action Button
-            Button(
-                onClick = { viewModel.save() },
-                enabled = state.canSave,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-            ) {
-                if (state.isSaving) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
+                    // Inline progress error reporting
+                    if (state.isProgressInvalid) {
+                        val errTxt = when {
+                            (state.parsedProgress ?: 0) < 0 -> "Progress cannot be negative"
+                            state.parsedTotal != null && (state.parsedProgress ?: 0) > (state.parsedTotal ?: 0) -> "Progress cannot exceed total items"
+                            else -> "Invalid progress input"
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = errTxt,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Star Rating (Editable)
+                    Text(
+                        text = "My Rating",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
                     )
-                } else {
-                    Text("Save Tracker", fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    StarRating(
+                        rating = state.rating,
+                        isEditable = true,
+                        onRatingChanged = { viewModel.updateRating(it) }
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Notes field
+                    OutlinedTextField(
+                        value = state.notes,
+                        onValueChange = { viewModel.updateNotes(it) },
+                        label = { Text("Notes", fontSize = 12.sp) },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Source URL & Open Link
+                    if (!state.isNew && state.sourceUrl.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = state.sourceUrl,
+                                onValueChange = { viewModel.updateSourceUrl(it) },
+                                label = { Text("Source URL", fontSize = 12.sp) },
+                                singleLine = true,
+                                isError = state.isUrlInvalid,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            IconButton(
+                                onClick = {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.sourceUrl))
+                                    context.startActivity(intent)
+                                },
+                                enabled = !state.isUrlInvalid,
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = "Open in browser",
+                                    tint = dominantColor ?: MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(24.dp))
+                    } else if (!state.isNew) {
+                        OutlinedTextField(
+                            value = state.sourceUrl,
+                            onValueChange = { viewModel.updateSourceUrl(it) },
+                            label = { Text("Source URL", fontSize = 12.sp) },
+                            singleLine = true,
+                            isError = state.isUrlInvalid,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                    }
+
+                    // Save Action Button
+                    Button(
+                        onClick = { viewModel.save() },
+                        enabled = state.canSave,
+                        colors = if (dominantColor != null) {
+                            ButtonDefaults.buttonColors(
+                                containerColor = dominantColor!!,
+                                contentColor = Color.White
+                            )
+                        } else {
+                            ButtonDefaults.buttonColors()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        if (state.isSaving) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        } else {
+                            Text("Save Tracker", fontSize = 14.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(32.dp))
                 }
             }
 
-            Spacer(modifier = Modifier.height(40.dp))
+            // ==================== OVERLAID APP BAR ====================
+            TopAppBar(
+                title = {}, // Keep empty to let the background cover shine
+                navigationIcon = {
+                    IconButton(
+                        onClick = {
+                            if (viewModel.checkBackPressAllowed()) {
+                                onBack()
+                            }
+                        },
+                        modifier = Modifier.background(
+                            color = Color.Black.copy(alpha = 0.4f),
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Go back",
+                            tint = Color.White
+                        )
+                    }
+                },
+                actions = {
+                    if (!state.isNew) {
+                        IconButton(
+                            onClick = { viewModel.showDeleteConfirm(true) },
+                            modifier = Modifier.background(
+                                color = Color.Black.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete item",
+                                tint = Color.Red
+                            )
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent
+                )
+            )
         }
     }
 
-    // Confirmation Dialogs
+    // Delete Confirmation Dialog
     if (state.showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { viewModel.showDeleteConfirm(false) },
             title = { Text("Delete Tracker") },
-            text = { Text("Are you sure you want to delete this media tracker? All your progress records for this item will be lost.") },
+            text = { Text("Are you sure you want to delete this media tracker? This will remove all progress history and local cover art.") },
             confirmButton = {
                 TextButton(
                     onClick = { viewModel.deleteItem() }
@@ -476,11 +635,12 @@ fun UnifiedAddEditScreen(
         )
     }
 
+    // Discard warning dialog
     if (state.showDiscardConfirm) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissDiscardConfirm() },
             title = { Text("Discard Changes") },
-            text = { Text("You have unsaved changes in your tracker editing. Are you sure you want to discard them?") },
+            text = { Text("You have unsaved changes. Are you sure you want to discard them and go back?") },
             confirmButton = {
                 TextButton(
                     onClick = {
