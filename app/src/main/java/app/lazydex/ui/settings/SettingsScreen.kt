@@ -1,6 +1,7 @@
 package app.lazydex.ui.settings
 
 import android.content.Context
+import app.lazydex.BuildConfig
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -278,7 +279,7 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Version 0.0.1-beta",
+                        text = "v${BuildConfig.VERSION_NAME}",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )

@@ -105,6 +105,13 @@ jobs:
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
 
+      - name: Patch version in build.gradle.kts from git tag
+        run: |
+          VER="${{ needs.prepare-build.outputs.VERSION_TAG }}"
+          # Strip leading "v" from tag (v1.2.0 -> 1.2.0)
+          VER="${VER#v}"
+          sed -i "s/versionName = \".*\"/versionName = \"$VER\"/" app/build.gradle.kts
+
       - name: Run unit tests
         run: ./gradlew test
 
