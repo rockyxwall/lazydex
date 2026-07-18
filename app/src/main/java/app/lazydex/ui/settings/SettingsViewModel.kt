@@ -123,14 +123,11 @@ class SettingsViewModel(
                 val local = repository.getAll()
                 val mergeResult = BackupProcessor.merge(local, imported.items)
                 
-                // Save database
-                repository.replaceAll(mergeResult.mergedItems)
-
-                // Restore covers
+                // Ensure local covers directory exists
                 if (!localCoversDir.exists()) localCoversDir.mkdirs()
-                
-                // Copy the covers that won or are new
-                mergeResult.mergedItems.forEach { mergedItem ->
+
+                // Map items to update their cover image paths after file extraction
+                val finalItems = mergeResult.mergedItems.map { mergedItem ->
                     val matchedImported = imported.items.firstOrNull {
                         it.id == mergedItem.id || (it.sourceUrl != null && it.sourceUrl == mergedItem.sourceUrl)
                     }
@@ -139,9 +136,15 @@ class SettingsViewModel(
                         if (srcFile.exists()) {
                             val destFile = File(localCoversDir, mergedItem.id)
                             srcFile.copyTo(destFile, overwrite = true)
+                            // Update path to point to the newly restored file
+                            return@map mergedItem.copy(coverImagePath = destFile.absolutePath)
                         }
                     }
+                    mergedItem
                 }
+
+                // Save updated items to database
+                repository.replaceAll(finalItems)
 
                 _uiState.value = _uiState.value.copy(
                     isImporting = false,
@@ -165,17 +168,26 @@ class SettingsViewModel(
         _uiState.value = _uiState.value.copy(isImporting = true)
         viewModelScope.launch {
             try {
-                // Save database
-                repository.replaceAll(imported.items)
-
                 // Wipe existing covers
                 if (localCoversDir.exists()) {
                     localCoversDir.deleteRecursively()
                 }
                 localCoversDir.mkdirs()
 
-                // Copy all covers from temp folder
-                BackupManager.restoreAllCovers(imported.tempCoversDir, localCoversDir)
+                // Map items to update their cover image paths while restoring all covers
+                val finalItems = imported.items.map { item ->
+                    val srcFile = File(imported.tempCoversDir, item.id)
+                    if (srcFile.exists()) {
+                        val destFile = File(localCoversDir, item.id)
+                        srcFile.copyTo(destFile, overwrite = true)
+                        item.copy(coverImagePath = destFile.absolutePath)
+                    } else {
+                        item
+                    }
+                }
+
+                // Save database
+                repository.replaceAll(finalItems)
 
                 _uiState.value = _uiState.value.copy(
                     isImporting = false,
