@@ -16,6 +16,7 @@ class ThemePreferences(private val context: Context) {
     companion object {
         val THEME_MODE_KEY = stringPreferencesKey("theme_mode")
         val AMOLED_MODE_KEY = booleanPreferencesKey("amoled_mode")
+        val COVER_THEMING_KEY = booleanPreferencesKey("cover_theming")
     }
 
     val themeMode: Flow<String> = context.dataStore.data.map { preferences ->
@@ -24,6 +25,10 @@ class ThemePreferences(private val context: Context) {
 
     val amoledMode: Flow<Boolean> = context.dataStore.data.map { preferences ->
         preferences[AMOLED_MODE_KEY] ?: false
+    }
+
+    val coverTheming: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[COVER_THEMING_KEY] ?: false
     }
 
     suspend fun setThemeMode(mode: String) {
@@ -35,6 +40,12 @@ class ThemePreferences(private val context: Context) {
     suspend fun setAmoledMode(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[AMOLED_MODE_KEY] = enabled
+        }
+    }
+
+    suspend fun setCoverTheming(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[COVER_THEMING_KEY] = enabled
         }
     }
 }

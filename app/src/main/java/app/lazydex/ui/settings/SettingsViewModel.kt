@@ -20,6 +20,7 @@ import java.io.File
 data class SettingsUiState(
     val themeMode: String = "DARK",
     val amoledMode: Boolean = false,
+    val coverTheming: Boolean = false,
     val importedBackup: ImportedBackup? = null,
     val isExporting: Boolean = false,
     val isImporting: Boolean = false,
@@ -48,6 +49,11 @@ class SettingsViewModel(
                 _uiState.value = _uiState.value.copy(amoledMode = amoled)
             }
         }
+        viewModelScope.launch {
+            themePreferences.coverTheming.collect { coverTheme ->
+                _uiState.value = _uiState.value.copy(coverTheming = coverTheme)
+            }
+        }
     }
 
     fun setThemeMode(mode: String) {
@@ -59,6 +65,12 @@ class SettingsViewModel(
     fun setAmoledMode(enabled: Boolean) {
         viewModelScope.launch {
             themePreferences.setAmoledMode(enabled)
+        }
+    }
+
+    fun setCoverTheming(enabled: Boolean) {
+        viewModelScope.launch {
+            themePreferences.setCoverTheming(enabled)
         }
     }
 

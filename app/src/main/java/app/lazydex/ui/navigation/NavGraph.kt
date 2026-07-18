@@ -1,16 +1,15 @@
 package app.lazydex.ui.navigation
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.toRoute
 import app.lazydex.ui.addedit.UnifiedAddEditScreen
+import app.lazydex.ui.settings.AboutScreen
+import app.lazydex.ui.settings.AppearanceScreen
+import app.lazydex.ui.settings.DataAndStorageScreen
 import app.lazydex.ui.settings.SettingsScreen
 import kotlinx.serialization.Serializable
 
@@ -68,32 +67,38 @@ fun LazyDexNavGraph(
             SettingsScreen(
                 onBack = {
                     navController.popBackStack()
+                },
+                onNavigateToAppearance = {
+                    navController.navigate(AppearanceRoute)
+                },
+                onNavigateToDataAndStorage = {
+                    navController.navigate(DataAndStorageRoute)
+                },
+                onNavigateToAbout = {
+                    navController.navigate(AboutRoute)
                 }
             )
         }
         composable<AppearanceRoute> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Appearance Screen Placeholder")
-            }
+            AppearanceScreen(
+                onBack = {
+                    navController.popBackStack()
+                }
+            )
         }
         composable<DataAndStorageRoute> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Data and Storage Screen Placeholder")
-            }
+            DataAndStorageScreen(
+                onBack = {
+                    navController.popBackStack()
+                }
+            )
         }
         composable<AboutRoute> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("About Screen Placeholder")
-            }
+            AboutScreen(
+                onBack = {
+                    navController.popBackStack()
+                }
+            )
         }
     }
 }
