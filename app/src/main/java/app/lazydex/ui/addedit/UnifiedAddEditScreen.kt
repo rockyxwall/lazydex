@@ -2,11 +2,16 @@ package app.lazydex.ui.addedit
 
 import android.content.Intent
 import android.net.Uri
+import android.text.Html
+import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +27,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -32,9 +40,11 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,17 +71,18 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import app.lazydex.domain.model.MediaCategory
 import app.lazydex.domain.model.UserStatus
 import app.lazydex.ui.components.AltTitleEditor
 import app.lazydex.ui.components.CoverImage
 import app.lazydex.ui.components.StarRating
+import app.lazydex.ui.components.formatDate
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.koin.androidx.compose.koinViewModel
 
-// Helper for lightweight bitmap average color extraction
 fun extractAverageColor(imagePath: String): Color? {
     if (imagePath.isEmpty()) return null
     val file = java.io.File(imagePath)
@@ -88,7 +99,7 @@ fun extractAverageColor(imagePath: String): Color? {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun UnifiedAddEditScreen(
     itemId: String?,
@@ -101,8 +112,9 @@ fun UnifiedAddEditScreen(
     val context = LocalContext.current
 
     var dominantColor by remember { mutableStateOf<Color?>(null) }
+    var newGenreInput by remember { mutableStateOf("") }
+    var newTagInput by remember { mutableStateOf("") }
 
-    // Dynamic color extraction on cover art updates
     LaunchedEffect(state.coverImagePath) {
         if (state.coverImagePath.isNotEmpty()) {
             withContext(Dispatchers.IO) {
@@ -116,14 +128,12 @@ fun UnifiedAddEditScreen(
         }
     }
 
-    // Trigger back pop when save/delete is complete
     LaunchedEffect(state.isDone) {
         if (state.isDone) {
             onBack()
         }
     }
 
-    // Intercept back presses to warn about unsaved changes
     BackHandler {
         if (viewModel.checkBackPressAllowed()) {
             onBack()
@@ -139,13 +149,12 @@ fun UnifiedAddEditScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // ==================== SCROLLABLE CONTENT COLUMN ====================
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(scrollState)
             ) {
-                // ==================== DYNAMIC BLURRED HEADER CONTAINER ====================
+                // Header Container
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -174,7 +183,6 @@ fun UnifiedAddEditScreen(
                         )
                     }
 
-                    // Bottom background fade gradient
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -186,7 +194,6 @@ fun UnifiedAddEditScreen(
                             )
                     )
 
-                    // Foreground Cover Art & Titles
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
@@ -215,6 +222,16 @@ fun UnifiedAddEditScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onBackground
                             )
+                            if (state.author.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "by ${state.author}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = state.category.displayName,
@@ -232,13 +249,12 @@ fun UnifiedAddEditScreen(
                     }
                 }
 
-                // ==================== FORM ITEMS CONTAINER ====================
+                // Form Container
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
                 ) {
-                    // Error Message
                     state.errorMsg?.let { error ->
                         Text(
                             text = error,
@@ -249,7 +265,6 @@ fun UnifiedAddEditScreen(
                         )
                     }
 
-                    // URL Scraping block (Visible only in Add Mode)
                     if (state.isNew) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -293,7 +308,6 @@ fun UnifiedAddEditScreen(
                         Spacer(modifier = Modifier.height(16.dp))
                     }
 
-                    // Cover image URL text input
                     OutlinedTextField(
                         value = state.coverImageUrl ?: "",
                         onValueChange = { viewModel.updateCoverImageUrl(it) },
@@ -305,7 +319,6 @@ fun UnifiedAddEditScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Title Field (Required)
                     OutlinedTextField(
                         value = state.title,
                         onValueChange = { viewModel.updateTitle(it) },
@@ -322,7 +335,16 @@ fun UnifiedAddEditScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Alternative Titles editor
+                    OutlinedTextField(
+                        value = state.author,
+                        onValueChange = { viewModel.updateAuthor(it) },
+                        label = { Text("Author", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     AltTitleEditor(
                         mainTitle = state.title,
                         alternativeTitles = state.alternativeTitles,
@@ -333,7 +355,6 @@ fun UnifiedAddEditScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Category Selection Chips
                     Text(
                         text = "Category",
                         style = MaterialTheme.typography.titleMedium,
@@ -350,24 +371,12 @@ fun UnifiedAddEditScreen(
                         FilterChipDefaults.filterChipColors()
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        MediaCategory.entries.take(3).forEach { category ->
-                            FilterChip(
-                                selected = state.category == category,
-                                onClick = { viewModel.updateCategory(category) },
-                                label = { Text(category.displayName, fontSize = 11.sp) },
-                                colors = chipColors
-                            )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        MediaCategory.entries.drop(3).forEach { category ->
+                        MediaCategory.entries.forEach { category ->
                             FilterChip(
                                 selected = state.category == category,
                                 onClick = { viewModel.updateCategory(category) },
@@ -379,7 +388,6 @@ fun UnifiedAddEditScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Status Selection Chips (Category-Adaptive)
                     Text(
                         text = "Status",
                         style = MaterialTheme.typography.titleMedium,
@@ -394,24 +402,12 @@ fun UnifiedAddEditScreen(
                         }
                         listOf(primaryLabel, UserStatus.COMPLETED, UserStatus.ON_HOLD, UserStatus.DROPPED, UserStatus.PLAN_TO)
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        adaptiveStatusOptions.take(3).forEach { status ->
-                            FilterChip(
-                                selected = state.userStatus == status,
-                                onClick = { viewModel.updateStatus(status) },
-                                label = { Text(status.displayName, fontSize = 11.sp) },
-                                colors = chipColors
-                            )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        adaptiveStatusOptions.drop(3).forEach { status ->
+                        adaptiveStatusOptions.forEach { status ->
                             FilterChip(
                                 selected = state.userStatus == status,
                                 onClick = { viewModel.updateStatus(status) },
@@ -448,7 +444,6 @@ fun UnifiedAddEditScreen(
                         )
                     }
 
-                    // Inline progress error reporting
                     if (state.isProgressInvalid) {
                         val errTxt = when {
                             (state.parsedProgress ?: 0) < 0 -> "Progress cannot be negative"
@@ -466,6 +461,129 @@ fun UnifiedAddEditScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // Dates Section (Started Date & Completed Date)
+                    Text(
+                        text = "Dates",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Started Date Picker Field
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedTextField(
+                                value = formatDate(state.startDate),
+                                onValueChange = {},
+                                enabled = false,
+                                label = { Text("Started Date", fontSize = 12.sp) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.CalendarToday,
+                                        contentDescription = "Start Date",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (state.startDate != null) {
+                                        IconButton(onClick = { viewModel.updateStartDate(null) }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Clear start date",
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    disabledBorderColor = MaterialTheme.colorScheme.outline,
+                                    disabledLeadingIconColor = MaterialTheme.colorScheme.primary
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clickable {
+                                        val cal = java.util.Calendar.getInstance()
+                                        if (state.startDate != null) cal.timeInMillis = state.startDate!!
+                                        android.app.DatePickerDialog(
+                                            context,
+                                            { _, year, month, day ->
+                                                val selected = java.util.Calendar.getInstance()
+                                                selected.set(year, month, day)
+                                                viewModel.updateStartDate(selected.timeInMillis)
+                                            },
+                                            cal.get(java.util.Calendar.YEAR),
+                                            cal.get(java.util.Calendar.MONTH),
+                                            cal.get(java.util.Calendar.DAY_OF_MONTH)
+                                        ).show()
+                                    }
+                            )
+                        }
+
+                        // Completed Date Picker Field
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedTextField(
+                                value = formatDate(state.endDate),
+                                onValueChange = {},
+                                enabled = false,
+                                label = { Text("Completed Date", fontSize = 12.sp) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.CalendarToday,
+                                        contentDescription = "Completed Date",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (state.endDate != null) {
+                                        IconButton(onClick = { viewModel.updateEndDate(null) }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Clear end date",
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    disabledBorderColor = MaterialTheme.colorScheme.outline,
+                                    disabledLeadingIconColor = MaterialTheme.colorScheme.primary
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clickable {
+                                        val cal = java.util.Calendar.getInstance()
+                                        if (state.endDate != null) cal.timeInMillis = state.endDate!!
+                                        android.app.DatePickerDialog(
+                                            context,
+                                            { _, year, month, day ->
+                                                val selected = java.util.Calendar.getInstance()
+                                                selected.set(year, month, day)
+                                                viewModel.updateEndDate(selected.timeInMillis)
+                                            },
+                                            cal.get(java.util.Calendar.YEAR),
+                                            cal.get(java.util.Calendar.MONTH),
+                                            cal.get(java.util.Calendar.DAY_OF_MONTH)
+                                        ).show()
+                                    }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
                     // Star Rating (Editable)
                     Text(
                         text = "My Rating",
@@ -478,6 +596,144 @@ fun UnifiedAddEditScreen(
                         isEditable = true,
                         onRatingChanged = { viewModel.updateRating(it) }
                     )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Genres Section
+                    Text(
+                        text = "Genres",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        state.genres.forEach { genre ->
+                            InputChip(
+                                selected = true,
+                                onClick = { viewModel.removeGenre(genre) },
+                                label = { Text(genre, fontSize = 11.sp) },
+                                trailingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove genre",
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = newGenreInput,
+                            onValueChange = { newGenreInput = it },
+                            placeholder = { Text("Add genre...", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = {
+                            if (newGenreInput.isNotBlank()) {
+                                viewModel.addGenre(newGenreInput)
+                                newGenreInput = ""
+                            }
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = "Add genre")
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Tags Section
+                    Text(
+                        text = "Tags",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        state.tags.forEach { tag ->
+                            InputChip(
+                                selected = true,
+                                onClick = { viewModel.removeTag(tag) },
+                                label = { Text(tag, fontSize = 11.sp) },
+                                trailingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove tag",
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = newTagInput,
+                            onValueChange = { newTagInput = it },
+                            placeholder = { Text("Add tag...", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = {
+                            if (newTagInput.isNotBlank()) {
+                                viewModel.addTag(newTagInput)
+                                newTagInput = ""
+                            }
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = "Add tag")
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Description Field (With Rich Text HTML Preview)
+                    OutlinedTextField(
+                        value = state.description,
+                        onValueChange = { viewModel.updateDescription(it) },
+                        label = { Text("Description (HTML supported)", fontSize = 12.sp) },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (state.description.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Preview:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(12.dp)
+                        ) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    TextView(ctx).apply {
+                                        setTextColor(android.graphics.Color.WHITE)
+                                        textSize = 14f
+                                    }
+                                },
+                                update = { textView ->
+                                    textView.text = Html.fromHtml(state.description, Html.FROM_HTML_MODE_COMPACT)
+                                }
+                            )
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(16.dp))
 
@@ -558,7 +814,7 @@ fun UnifiedAddEditScreen(
                                 color = MaterialTheme.colorScheme.onPrimary
                             )
                         } else {
-                            Text("Save Tracker", fontSize = 14.sp)
+                            Text(if (state.isNew) "Add Tracker" else "Save Tracker", fontSize = 14.sp)
                         }
                     }
 
@@ -566,9 +822,9 @@ fun UnifiedAddEditScreen(
                 }
             }
 
-            // ==================== OVERLAID APP BAR ====================
+            // Top AppBar overlay
             TopAppBar(
-                title = {}, // Keep empty to let the background cover shine
+                title = {},
                 navigationIcon = {
                     IconButton(
                         onClick = {
