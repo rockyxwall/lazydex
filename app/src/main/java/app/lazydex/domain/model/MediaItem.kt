@@ -7,20 +7,28 @@ data class MediaItem(
     val category: MediaCategory,
     val title: String,
     val alternativeTitles: List<String> = emptyList(),  // Flexible list stored as JSON
-    val sourceUrl: String?,      // Nullable — SQLite UNIQUE index treats NULLs as non-duplicates
-    val coverImagePath: String,  // Local file path (not URL), empty if no cover
-    val coverImageUrl: String?,  // Nullable original URL of the cover (used as fallback for download/restore)
+    val sourceUrl: String? = null,      // Nullable — SQLite UNIQUE index treats NULLs as non-duplicates
+    val coverImagePath: String = "",  // Local file path (not URL), empty if no cover
+    val coverImageUrl: String? = null,  // Nullable original URL of the cover (used as fallback for download/restore)
+
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
     val userStatus: UserStatus,
     val rating: Double? = null,  // 1.0–5.0 stars, null = unrated
     val notes: String = "",      // User notes/annotations
+    val genres: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val author: String = "",
+    val description: String = "",
+    val startDate: Long? = null,
+    val endDate: Long? = null,
     val lastUpdated: Long,       // System.currentTimeMillis()
     val dateAdded: Long          // System.currentTimeMillis() on creation (stable sort)
 ) {
     /**
      * Canonical normalization — run before EVERY write (add, update, import, merge).
-     * - Trims whitespace from title, sourceUrl, coverImagePath, coverImageUrl, notes
+     * - Trims whitespace from title, sourceUrl, coverImagePath, coverImageUrl, notes, author, description
+     * - Normalizes genre and tag lists (trim, replace '_', deduplicate case-insensitively)
      * - Ensures title is never blank (defaults to "Untitled")
      * - Filters blank alt titles
      * - Clamps currentProgress to [0, totalItems] when totalItems is non-null
@@ -50,7 +58,24 @@ data class MediaItem(
             totalItems = safeTotal,
             currentProgress = safeProgress,
             rating = safeRating,
-            notes = notes.trim()
+            notes = notes.trim(),
+            genres = normalizeGenreList(genres),
+            tags = normalizeGenreList(tags),
+            author = author.trim(),
+            description = description.trim(),
+            startDate = startDate?.takeIf { it > 0 },
+            endDate = endDate?.takeIf { it > 0 }
         )
     }
+
+    companion object {
+        fun normalizeGenreList(list: List<String>): List<String> {
+            val seen = mutableSetOf<String>()
+            return list.map {
+                it.trim().replace('_', ' ').replace(Regex("\\s+"), " ")
+            }.filter { it.isNotBlank() }
+             .filter { seen.add(it.lowercase().replace(" ", "")) }
+        }
+    }
 }
+

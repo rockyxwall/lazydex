@@ -1,5 +1,6 @@
 package app.lazydex.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -21,6 +22,13 @@ data class MediaItemEntity(
     val userStatus: String,          // Stored as uppercase string (e.g. "READING")
     val rating: Double?,             // 1.0–5.0, null = unrated
     val notes: String,
+    @ColumnInfo(defaultValue = "[]") val genres: String = "[]",
+    @ColumnInfo(defaultValue = "[]") val tags: String = "[]",
+    @ColumnInfo(defaultValue = "") val author: String = "",
+    @ColumnInfo(defaultValue = "") val description: String = "",
+    val startDate: Long? = null,
+    val endDate: Long? = null,
     val lastUpdated: Long,
     val dateAdded: Long
 )
+
