@@ -15,6 +15,11 @@ interface MediaRepository {
     fun observeById(id: String): Flow<MediaItem?>  // Single-item observation for UnifiedAddEditViewModel
     fun observeCount(): Flow<Int>                  // Total item count for library badge
     fun observeStats(): Flow<MediaStats>
+    fun observeCategoryCounts(): Flow<Map<MediaCategory, Int>>
+    fun observeStatusCounts(category: MediaCategory?): Flow<Map<StatusFilter, Int>>
+    fun observeDistinctGenres(category: MediaCategory?): Flow<List<String>>
+    fun observeDistinctTags(category: MediaCategory?): Flow<List<String>>
+
 
     /** One-shot reads */
     suspend fun getById(id: String): MediaItem?
