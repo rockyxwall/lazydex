@@ -136,7 +136,7 @@ fun AboutScreen(
                 color = MaterialTheme.colorScheme.onBackground
             )
             Text(
-                text = "Version ${BuildConfig.VERSION_NAME}",
+                text = "v${BuildConfig.VERSION_NAME}",
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
             )
