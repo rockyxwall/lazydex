@@ -7,7 +7,8 @@ enum class UserStatus(val displayName: String) {
     COMPLETED("Completed"),
     ON_HOLD("On Hold"),
     DROPPED("Dropped"),
-    PLAN_TO("Plan to");
+    PLAN_TO("Plan to"),
+    REPEATING("Repeating");
 
     companion object {
         fun fromString(value: String): UserStatus? {

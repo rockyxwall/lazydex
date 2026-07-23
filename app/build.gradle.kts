@@ -13,13 +13,14 @@ android {
         applicationId = "app.lazydex"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.0.2"
+        versionCode = 3
+        versionName = "0.0.3"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -95,6 +96,7 @@ dependencies {
   // Koin
   implementation(libs.koin.android)
   implementation(libs.koin.compose)
+  implementation(libs.koin.workmanager)
 
   // OkHttp & Jsoup
   implementation(libs.okhttp)
@@ -112,4 +114,7 @@ dependencies {
 
   // WorkManager
   implementation(libs.androidx.work.runtime.ktx)
+
+  // Security Crypto
+  implementation(libs.androidx.security.crypto)
 }

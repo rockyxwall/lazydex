@@ -14,7 +14,7 @@ data class MediaItem(
     val currentProgress: Int,    // Always >= 0, and <= totalItems when total is non-null
     val totalItems: Int?,        // null = unknown/ongoing
     val userStatus: UserStatus,
-    val rating: Double? = null,  // 1.0–5.0 stars, null = unrated
+    val rating: Int? = null,     // 0–100 integer score, null = unrated
     val notes: String = "",      // User notes/annotations
     val genres: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
@@ -23,19 +23,27 @@ data class MediaItem(
     val startDate: Long? = null,
     val endDate: Long? = null,
     val lastUpdated: Long,       // System.currentTimeMillis()
-    val dateAdded: Long          // System.currentTimeMillis() on creation (stable sort)
+    val dateAdded: Long,         // System.currentTimeMillis() on creation (stable sort)
+
+    // v0.0.3 extended sync & metadata fields
+    val localUpdatedAt: Long = lastUpdated,
+    val lastSyncedAt: Long? = null,
+    val anilistListEntryId: Long? = null,
+    val isPrivate: Boolean = false,
+    val mediaFormat: MediaFormat? = null,
+    val rawFormat: String? = null,
+    val publishingStatus: String? = null,
+    val season: String? = null,
+    val totalVolumes: Int? = null,
+    val progressVolumes: Int = 0,
+    val durationMinutes: Int? = null,
+    val sourceMaterial: String? = null,
+    val isAdult: Boolean = false,
+    val isDoujin: Boolean = false,
+    val syncPendingAction: String? = null
 ) {
     /**
      * Canonical normalization — run before EVERY write (add, update, import, merge).
-     * - Trims whitespace from title, sourceUrl, coverImagePath, coverImageUrl, notes, author, description
-     * - Normalizes genre and tag lists (trim, replace '_', deduplicate case-insensitively)
-     * - Ensures title is never blank (defaults to "Untitled")
-     * - Filters blank alt titles
-     * - Clamps currentProgress to [0, totalItems] when totalItems is non-null
-     * - Clamps currentProgress >= 0 when totalItems is null
-     * - Caps rating to 1.0–5.0 range
-     * - Normalizes sourceUrl via UrlNormalizer
-     * - Validates coverImageUrl scheme is HTTP/HTTPS, otherwise null
      */
     fun normalize(): MediaItem {
         val normalizedUrl = sourceUrl?.takeIf { it.isNotBlank() }?.let { UrlNormalizer.normalize(it) }
@@ -48,7 +56,15 @@ data class MediaItem(
             safeTotal != null && currentProgress > safeTotal -> safeTotal
             else -> currentProgress
         }
-        val safeRating = rating?.coerceIn(1.0, 5.0)
+        val safeRating = rating?.coerceIn(0, 100)
+        val safeTotalVolumes = totalVolumes?.takeIf { it >= 0 }
+        val safeProgressVolumes = when {
+            progressVolumes < 0 -> 0
+            safeTotalVolumes != null && progressVolumes > safeTotalVolumes -> safeTotalVolumes
+            else -> progressVolumes
+        }
+        val safeDuration = durationMinutes?.takeIf { it >= 0 }
+
         return copy(
             title = title.trim().ifBlank { "Untitled" },
             alternativeTitles = alternativeTitles.map { it.trim() }.filter { it.isNotBlank() },
@@ -64,7 +80,17 @@ data class MediaItem(
             author = author.trim(),
             description = description.trim(),
             startDate = startDate?.takeIf { it > 0 },
-            endDate = endDate?.takeIf { it > 0 }
+            endDate = endDate?.takeIf { it > 0 },
+            lastSyncedAt = lastSyncedAt?.takeIf { it > 0 },
+            anilistListEntryId = anilistListEntryId?.takeIf { it > 0 },
+            rawFormat = rawFormat?.trim()?.ifBlank { null },
+            publishingStatus = publishingStatus?.trim()?.ifBlank { null },
+            season = season?.trim()?.ifBlank { null },
+            totalVolumes = safeTotalVolumes,
+            progressVolumes = safeProgressVolumes,
+            durationMinutes = safeDuration,
+            sourceMaterial = sourceMaterial?.trim()?.ifBlank { null },
+            syncPendingAction = syncPendingAction?.trim()?.ifBlank { null }
         )
     }
 
@@ -78,4 +104,3 @@ data class MediaItem(
         }
     }
 }
-

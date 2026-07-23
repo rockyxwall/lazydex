@@ -140,8 +140,8 @@ class DexViewModel(
             (fs.selectedGenres.isEmpty() || item.genres.any { it.lowercase() in fs.selectedGenres }) &&
             (fs.selectedTags.isEmpty() || item.tags.any { it.lowercase() in fs.selectedTags }) &&
             (afs.authorQuery.isBlank() || item.author.contains(afs.authorQuery, ignoreCase = true)) &&
-            (afs.minRating == null || (item.rating ?: 0.0) >= afs.minRating) &&
-            (afs.maxRating == null || (item.rating ?: 0.0) <= afs.maxRating) &&
+            (afs.minRating == null || (item.rating ?: 0).toDouble() >= afs.minRating) &&
+            (afs.maxRating == null || (item.rating ?: 0).toDouble() <= afs.maxRating) &&
             (afs.dateRangeStart == null || (item.startDate != null && item.startDate >= afs.dateRangeStart)) &&
             (afs.dateRangeEnd == null || (item.startDate != null && item.startDate <= afs.dateRangeEnd))
         }

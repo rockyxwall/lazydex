@@ -1,194 +1,119 @@
 # LazyDex v0.0.3 — AniList OAuth Sync & Extended Metadata Architecture
 
+> **Status**: ✅ **IMPLEMENTED & VERIFIED** (2026-07-23)
 > **Tagline**: Two-way AniList sync, extended media metadata (format, duration, volumes, status, season), configurable 5-system rating architecture, and AniList-style local statistics calculation.
 > **Prerequisite**: v0.0.2 codebase (Source interface, AniListSource, BackupProcessor merge logic).
-> **Replaces**: The OAuth sync section from original v0.0.3 plan.
+> **Verification**: `./gradlew test` (100% Passed), `./gradlew assembleDebug` (Build Successful).
 
 ---
 
 ## 1. Executive Summary & Core Capabilities
 
 - **Login Flow**: Mihon-style dedicated `TrackLoginActivity` capturing `lazydex://anilist-auth` deep links, parsing URI fragment `#access_token=...`, and validating CSRF `state` parameter before storing credentials in `AnilistTokenStore`.
-- **Full Pull**: Paginated fetching of all user AniList entries using `$chunk` and `$perPage = 500` with 429 rate-limit backoff, deduplicating by `MediaListEntry.id`, with null-safe media DTO guards.
+- **Full Pull**: Paginated fetching of all user AniList entries using `$chunk` and `$perPage = 100` with 429 rate-limit backoff, deduplicating by `MediaListEntry.id`, with null-safe media DTO guards.
 - **3-Tier Item Matching**: Matches local entries by:
   1. `anilistListEntryId == entry.id`
   2. `sourceUrl == "https://anilist.co/anime/$mediaId"` (or `manga/$mediaId`)
-  3. Title + Local `MediaCategory` (using strict normalization and tie-breaking by `dateAdded DESC` on unlinked items).
+  3. Title + Local `MediaCategory` (using strict `TitleNormalizer` normalization and tie-breaking by `dateAdded DESC` on unlinked items indexed on `Dispatchers.Default`).
 - **Recategorization Unbind**: Automatically unbinds AniList IDs (`anilistListEntryId = null`) if an item is moved to a non-syncable category (`GAME`, live-action `TV`, live-action `MOVIE`).
-- **Conflict Resolution**: Timestamp-based (**Newest Timestamp Wins**): compares local `lastUpdated` with AniList `(updatedAt.toLong() * 1000L)`. The newer modification wins automatically, defaulting to local on tie.
-- **Live Push**: **Asynchronous Background Push** on progress increment / item edit. Local DB saves instantly so UI stays responsive, while a background coroutine pushes mutation to AniList with silent retry on failure.
-- **5-System Configurable Rating Architecture**: Stores score internally in SQLite DB as normalized `Int?` (0–100, `null` = unrated) to prevent float precision drift. Defaults to `POINT_5` (5-Star) for local-only state, and automatically syncs `ScoreFormat` preference (5-Star, 10-Pt, 10-Decimal, 100-Pt, 3-Smiley) with AniList profile on login.
-- **Local Statistics**: Computes watch days, chapter totals, and read volumes using explicit `progressVolumes` column filtered by LazyDex's local `category` enum.
+- **Conflict Resolution**: Timestamp-based with a **60-Second Clock Skew Buffer**:
+  - If modification timestamps are within 60s of each other: applies deterministic merge (`maxOf(local.currentProgress, remote.progress)`).
+  - Outside 60s buffer: strictly newer timestamp wins.
+- **Remote Deletion Reconciliation**: Bound items missing from AniList remote payload (and not recently edited locally) are flagged with `syncPendingAction = "REMOTE_DELETED_PENDING_RESOLUTION"`, presenting a UI banner in Settings allowing the user to **Unlink (Keep Local)** or **Delete Locally**.
+- **WorkManager Dynamic Delay**: When encountering HTTP 429 rate limits $> 60\text{s}$, `AnilistSyncQueueWorker` cancels execution and enqueues a replacement `OneTimeWorkRequest` with `.setInitialDelay(retryAfter, TimeUnit.SECONDS)`.
+- **5-System Configurable Rating Architecture**: Stores score internally in SQLite DB as normalized `Int?` (0–100, `null` = unrated) to prevent float precision drift. Automatically syncs `ScoreFormat` preference (5-Star, 10-Pt, 10-Decimal, 100-Pt, 3-Smiley) with AniList profile on login.
+- **Local Statistics**: Computes total progress, completed items, mean rating, category counts, and read/watch stats.
 
 ---
 
-## 2. Mihon Architecture (Replicated & Extended Patterns)
+## 2. Architecture & Components Implemented
 
-LazyDex replicates Mihon's modular tracker structure (see [`mihon-reference.md`](mihon-reference.md) for source trace):
+LazyDex replicates and extends Mihon's modular tracker structure:
 
-| Layer | Mihon File | LazyDex Equivalent | Purpose |
-|-------|-----------|-------------------|---------|
-| Deep Link Activity | `TrackLoginActivity.kt` | `TrackLoginActivity.kt` | Dedicated transparent activity for handling OAuth callback redirect |
-| Tracker Service | `Anilist.kt` | `AnilistSyncManager.kt` | High-level sync orchestrator, conflict resolver, and push/pull worker |
-| API Client | `AnilistApi.kt` | `AnilistApi.kt` | GraphQL queries & mutations with scoreRaw (0–100) exchange |
-| Auth Interceptor | `AnilistInterceptor.kt` | `AnilistInterceptor.kt` | Appends `Authorization: Bearer {token}` & catches 401 Unauthorized |
-| Rate Limiter | `.rateLimit(85, 1.minutes)` | `AnilistRateLimiter.kt` | OkHttp `Interceptor` enforcing 85 permits/min with HTTP 429 `Retry-After` backoff |
-| Token Storage | `TrackPreferences` | `AnilistTokenStore.kt` | Encrypted SharedPreferences storing token, expiry, user ID, and `ScoreFormat` |
+| Layer | File Path | Implementation Detail |
+|-------|-----------|-----------------------|
+| Deep Link Activity | [TrackLoginActivity.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/ui/auth/TrackLoginActivity.kt) | `singleTop` transparent activity handling OAuth redirect, parsing fragment tokens, and validating CSRF `state` |
+| Tracker Service | [AnilistSyncManager.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistSyncManager.kt) | 3-tier matcher, 60s skew-buffered conflict resolver, remote deletion reconciler, full pull & live push worker |
+| API Client | [AnilistApi.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistApi.kt) | GraphQL API supporting `Viewer`, paginated `MediaListCollection` (`$perPage = 100`), and `SaveMediaListEntry` |
+| Auth Interceptor | [AnilistInterceptor.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistInterceptor.kt) | Injects Bearer token header, catches HTTP 401, debounces user logout, and posts system notifications |
+| Rate Limiter | [AnilistRateLimiter.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistRateLimiter.kt) | Token bucket (85 req/min) with persistent `anilist_rate_limit_reset` timestamp tracking |
+| Token Storage | [AnilistTokenStore.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistTokenStore.kt) | Mutex-guarded EncryptedSharedPreferences with Keystore corruption recovery and Base64 fallback |
+| Background Sync | [AnilistSyncQueueWorker.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistSyncQueueWorker.kt) | WorkManager worker with dynamic long delay replacement requests and `Configuration.Provider` lazy initialization |
 
 ---
 
 ## 3. Database Migration: Room v2 → v3
 
-> Full reference: [`db-migration.md`](db-migration.md) — complete SQL DDL, entity annotations, and rollback safety.
+Room Database version incremented from **2 to 3**.
 
-### 13 New Columns & Entity Annotations (`MediaItemEntity.kt`)
+### Entity Schema ([MediaItemEntity.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/local/entity/MediaItemEntity.kt))
 
-Room Database version increments from **2 to 3**. The `rating` column stores `Int?` (0–100 integer, `null` = unrated) to prevent float precision drift:
+The `rating` column stores `Int?` (0–100 integer, `null` = unrated) to prevent float precision drift:
 
 ```kotlin
 @Entity(
     tableName = "media_items",
-    indices = [Index(value = ["sourceUrl"], unique = true)]
+    indices = [
+        Index(value = ["sourceUrl"], unique = true),
+        Index(value = ["anilistListEntryId"])
+    ]
 )
 data class MediaItemEntity(
-    // ... existing 19 columns ...
+    // ... core 19 columns ...
+    @ColumnInfo(defaultValue = "0") val localUpdatedAt: Long = 0,
     @ColumnInfo(defaultValue = "NULL") val lastSyncedAt: Long? = null,
     @ColumnInfo(defaultValue = "NULL") val anilistListEntryId: Long? = null,
     @ColumnInfo(defaultValue = "0") val isPrivate: Boolean = false,
-    @ColumnInfo(defaultValue = "NULL") val mediaFormat: String? = null,     // Stored as enum .name string
-    @ColumnInfo(defaultValue = "NULL") val rawFormat: String? = null,        // Original format string from AniList/scraper
+    @ColumnInfo(defaultValue = "NULL") val mediaFormat: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val rawFormat: String? = null,
     @ColumnInfo(defaultValue = "NULL") val publishingStatus: String? = null,
     @ColumnInfo(defaultValue = "NULL") val season: String? = null,
     @ColumnInfo(defaultValue = "NULL") val totalVolumes: Int? = null,
-    @ColumnInfo(defaultValue = "NULL") val progressVolumes: Int? = null,     // Completed volumes count
+    @ColumnInfo(defaultValue = "0") val progressVolumes: Int = 0,
     @ColumnInfo(defaultValue = "NULL") val durationMinutes: Int? = null,
     @ColumnInfo(defaultValue = "NULL") val sourceMaterial: String? = null,
     @ColumnInfo(defaultValue = "0") val isAdult: Boolean = false,
     @ColumnInfo(defaultValue = "0") val isDoujin: Boolean = false,
+    @ColumnInfo(defaultValue = "NULL") val syncPendingAction: String? = null
 )
 ```
 
-### Migration SQL (`LazyDexDatabase.kt`)
+### Migration Code (`Migration2To3` in [LazyDexDatabase.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/local/LazyDexDatabase.kt))
+
+Implements SQLite 4-step table rebuild (`media_items_new`), dynamically reading the legacy rating scale format from `SharedPreferences` to apply the exact conversion multiplier (`POINT_5` $\rightarrow \times 20$, `POINT_10` $\rightarrow \times 10$, etc.):
 
 ```kotlin
-val MIGRATION_2_3 = object : Migration(2, 3) {
+class Migration2To3(private val context: Context) : Migration(2, 3) {
     override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("ALTER TABLE media_items ADD COLUMN lastSyncedAt INTEGER DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN anilistListEntryId INTEGER DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN isPrivate INTEGER NOT NULL DEFAULT 0")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN mediaFormat TEXT DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN rawFormat TEXT DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN publishingStatus TEXT DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN season TEXT DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN totalVolumes INTEGER DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN progressVolumes INTEGER DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN durationMinutes INTEGER DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN sourceMaterial TEXT DEFAULT NULL")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN isAdult INTEGER NOT NULL DEFAULT 0")
-        db.execSQL("ALTER TABLE media_items ADD COLUMN isDoujin INTEGER NOT NULL DEFAULT 0")
-    }
-}
-```
+        val prefs = context.getSharedPreferences("lazydex_settings", Context.MODE_PRIVATE)
+        val oldFormat = prefs.getString("score_format", "POINT_10_DECIMAL") ?: "POINT_10_DECIMAL"
 
----
-
-## 4. OAuth Security & `TrackLoginActivity`
-
-### CSRF Protection & Intent Handling
-
-1. **`state` Generation**: On initiating login in `AnilistSyncManager`, generate a 256-bit random UUID string `authState`, save it in `AnilistTokenStore`, and construct the authorize URL:
-   `https://anilist.co/api/v2/oauth/authorize?client_id={CLIENT_ID}&response_type=token&redirect_uri=lazydex://anilist-auth&state={authState}`
-2. **Dedicated Activity (`TrackLoginActivity.kt`)**: Registered in `AndroidManifest.xml` with `<intent-filter>` for scheme `lazydex` and host `anilist-auth`.
-3. **Fragment Parsing & State Check**:
-   ```kotlin
-   class TrackLoginActivity : BaseActivity() {
-       override fun onCreate(savedInstanceState: Bundle?) {
-           super.onCreate(savedInstanceState)
-           val uri = intent.data ?: run { finish(); return }
-           
-           val fragment = uri.encodedFragment ?: uri.encodedQuery ?: ""
-           val params = fragment.split("&").associate {
-               val parts = it.split("=")
-               parts[0] to Uri.decode(parts.getOrNull(1) ?: "")
-           }
-           
-           val token = params["access_token"]
-           val returnedState = params["state"]
-           val savedState = tokenStore.getAuthState()
-           
-           if (token != null && returnedState == savedState) {
-               lifecycleScope.launch {
-                   syncManager.loginWithToken(token)
-                   returnToSettings()
-               }
-           } else {
-               tokenStore.clear()
-               returnToSettings()
-           }
-       }
-       
-       private fun returnToSettings() {
-           finish()
-           startActivity(Intent(this, MainActivity::class.java).apply {
-               addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-           })
-       }
-   }
-   ```
-4. **401 Unauthorized Recovery**: When `AnilistInterceptor` encounters HTTP 401:
-   - Call `AnilistTokenStore.clear()`
-   - Emit `AuthState.Unauthenticated` to UI
-   - Cancel ongoing sync tasks without throwing unhandled exceptions.
-
----
-
-## 5. Configurable 5-System Rating Architecture
-
-### Rating Scale & Storage Standard
-- DB Storage: Scores are stored as `scoreRaw: Int?` (0–100, where `null` = unrated).
-- Default Preference: `POINT_5` (5-Star 0.5–5.0 ★) for local-only users.
-- User Preference Enum `ScoreFormat`:
-  ```kotlin
-  enum class ScoreFormat(val displayName: String) {
-      POINT_100("100-Point (1-100)"),
-      POINT_10_DECIMAL("10-Point Decimal (1.0-10.0)"),
-      POINT_10("10-Point Integer (1-10)"),
-      POINT_5("5-Star (0.5-5.0 ★)"),
-      POINT_3("3-Point Smiley (😦 😐 😊)")
-  }
-  ```
-
-### Conversion & Rounding Rules
-
-```kotlin
-object ScoreConverter {
-    // Converts 0-100 DB score to UI display values
-    fun scoreToDisplay(scoreRaw: Int?, format: ScoreFormat): String = when {
-        scoreRaw == null || scoreRaw == 0 -> "Unrated"
-        else -> when (format) {
-            ScoreFormat.POINT_100 -> "$scoreRaw / 100"
-            ScoreFormat.POINT_10_DECIMAL -> String.format(Locale.US, "%.1f", scoreRaw / 10.0)
-            ScoreFormat.POINT_10 -> "${(scoreRaw / 10.0).roundToInt()}"
-            ScoreFormat.POINT_5 -> String.format(Locale.US, "%.1f ★", (scoreRaw / 10.0).roundToInt() / 2.0)
-            ScoreFormat.POINT_3 -> when {
-                scoreRaw <= 35 -> "😦"
-                scoreRaw <= 60 -> "😐"
-                else -> "😊"
-            }
+        val multiplier = when (oldFormat) {
+            "POINT_10_DECIMAL", "POINT_10" -> 10.0
+            "POINT_5" -> 20.0
+            "POINT_100" -> 1.0
+            "POINT_3" -> 33.33
+            else -> 10.0
         }
-    }
 
-    // Converts user UI inputs back to 0-100 DB score for storage and AniList push
-    fun uiToScoreRaw(value: Double, format: ScoreFormat): Int = when (format) {
-        ScoreFormat.POINT_100 -> value.toInt().coerceIn(1, 100)
-        ScoreFormat.POINT_10_DECIMAL -> (value * 10.0).roundToInt().coerceIn(10, 100)
-        ScoreFormat.POINT_10 -> (value * 10.0).roundToInt().coerceIn(10, 100)
-        ScoreFormat.POINT_5 -> (value * 20.0).roundToInt().coerceIn(10, 100) // Supports half stars (0.5 * 20 = 10)
-        ScoreFormat.POINT_3 -> when (value.toInt()) {
-            1 -> 30  // 😦
-            2 -> 50  // 😐
-            3 -> 90  // 😊
-            else -> 0
+        db.beginTransaction()
+        try {
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `media_items_new` ...""")
+            db.execSQL("""
+                INSERT INTO `media_items_new` ...
+                SELECT ...,
+                CASE 
+                    WHEN rating IS NULL THEN NULL 
+                    ELSE CAST(ROUND(rating * $multiplier) AS INTEGER) 
+                END, ...
+            """)
+            db.execSQL("DROP TABLE `media_items` text")
+            db.execSQL("ALTER TABLE `media_items_new` RENAME TO `media_items`")
+            db.execSQL("CREATE UNIQUE INDEX ...")
+            db.execSQL("CREATE INDEX ...")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 }
@@ -196,151 +121,66 @@ object ScoreConverter {
 
 ---
 
-## 6. Full Pull, Conflict Resolution & Matching Algorithm
+## 4. Configurable 5-System Rating Architecture
 
-### Conflict Resolution Strategy (Newest Timestamp Wins)
+- **Internal Storage**: `rating: Int?` (0–100).
+- **Format Converter**: [ScoreConverter.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/util/ScoreConverter.kt) handles conversion between 0–100 integer scores, user display strings, UI input values, and format interval snapping:
+  - `scoreToDisplay(scoreRaw, format)`
+  - `uiToScoreRaw(value, format)`
+  - `snapToFormatInterval(scoreRaw, format)`
 
 ```kotlin
-fun resolveSyncConflict(local: MediaItem, remote: ALMediaListEntry): SyncDecision {
-    val remoteUpdatedMs = (remote.updatedAt.toLong()) * 1000L
-    val localUpdatedMs = local.lastUpdated
-    
+enum class ScoreFormat(val displayName: String) {
+    POINT_100("100-Point (1-100)"),
+    POINT_10_DECIMAL("10-Point Decimal (1.0-10.0)"),
+    POINT_10("10-Point Integer (1-10)"),
+    POINT_5("5-Star (0.5-5.0 ★)"),
+    POINT_3("3-Point Smiley (😦 😐 😊)")
+}
+```
+
+---
+
+## 5. Conflict Resolution & Matching Engine
+
+### 60-Second Clock Skew Buffer ([AnilistSyncManager.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/data/anilist/AnilistSyncManager.kt))
+
+```kotlin
+fun resolveSyncConflict(localTimeMs: Long, remoteTimeMs: Long): SyncDecision {
+    val diff = abs(remoteTimeMs - localTimeMs)
     return when {
-        // Local edit is strictly newer -> Push local item to AniList
-        localUpdatedMs > remoteUpdatedMs -> SyncDecision.PushToRemote
-        
-        // Remote edit is strictly newer -> Pull remote item to local DB
-        remoteUpdatedMs > localUpdatedMs -> SyncDecision.PullFromRemote
-        
-        // Equal timestamps or tie -> Preserve local state
+        diff < CLOCK_SKEW_BUFFER_MS -> SyncDecision.KeepLocal // Deterministic progress merge
+        remoteTimeMs > localTimeMs -> SyncDecision.PullFromRemote
+        localTimeMs > remoteTimeMs -> SyncDecision.PushToRemote
         else -> SyncDecision.KeepLocal
     }
 }
 ```
 
-### Live Push Trigger Architecture (Asynchronous Background Push)
-
-```kotlin
-fun triggerLivePush(item: MediaItem) {
-    // 1. Immediate local SQLite upsert so UI updates instantly
-    viewModelScope.launch {
-        mediaRepository.upsert(item)
-    }
-    
-    // 2. Asynchronous background push if item has AniList binding
-    if (item.anilistListEntryId != null || item.sourceUrl?.contains("anilist.co") == true) {
-        syncScope.launch {
-            try {
-                anilistSyncManager.pushItem(item)
-            } catch (e: Exception) {
-                // Network/API failure: log silently and leave item for next Full Push retry
-                Log.w("LivePush", "Failed to live push ${item.id}, queued for batch push", e)
-            }
-        }
-    }
-}
-```
-
-### 3-Tier Matching Rules
-
-When ingesting an `ALMediaListEntry` from AniList during Full Pull:
-
-```kotlin
-suspend fun findMatchingLocalItem(
-    entry: ALMediaListEntry,
-    inferredCategory: MediaCategory
-): MediaItem? {
-    val entryId = entry.id
-    val mediaId = entry.mediaId
-    val expectedAniListUrl = "https://anilist.co/${if (inferredCategory == MediaCategory.ANIME) "anime" else "manga"}/$mediaId"
-    
-    // Tier 1: Match by explicit cached anilistListEntryId
-    val byEntryId = mediaDao.getByAnilistEntryId(entryId)
-    if (byEntryId != null) return byEntryId.toDomain()
-
-    // Tier 2: Match by exact AniList sourceUrl
-    val byUrl = mediaDao.getBySourceUrl(expectedAniListUrl)
-    if (byUrl != null) return byUrl.toDomain()
-
-    // Tier 3: Match by Normalized Title + Local MediaCategory
-    val rawTitle = entry.media?.title?.userPreferred 
-        ?: entry.media?.title?.romaji 
-        ?: entry.media?.title?.english 
-        ?: return null
-        
-    val normalizedRemoteTitle = TitleNormalizer.normalize(rawTitle)
-    val candidates = mediaDao.getAllUnboundByCategory(inferredCategory.name)
-        .filter { TitleNormalizer.normalize(it.title) == normalizedRemoteTitle }
-
-    // Tie-break rule: If multiple match, pick the unlinked item with the latest dateAdded
-    return candidates.maxByOrNull { it.dateAdded }?.toDomain()
-}
-```
+### 3-Tier Matcher
+1. **Tier 1**: Match by `anilistListEntryId` or `sourceUrl`.
+2. **Tier 2**: Match by normalized title index computed on `Dispatchers.Default`.
+3. **Tier 3**: Filter by category match, tie-breaking unlinked candidates by latest `dateAdded`.
 
 ---
 
-## 7. GraphQL API, Rate Limiting & Pagination Loop
+## 6. UI & Settings Integration
 
-### MediaListCollection Query DTO Guard & Deduplication
-
-```kotlin
-suspend fun fetchFullLibrary(type: String): List<ALMediaListEntry> {
-    val allEntries = mutableListOf<ALMediaListEntry>()
-    var chunk = 1
-    var hasNextChunk = true
-    
-    while (hasNextChunk) {
-        // Rate Limiter Interceptor delays if 85 requests/min limit is hit
-        val response = api.getMediaListCollection(type = type, chunk = chunk, perPage = 500)
-        
-        val collection = response.data?.mediaListCollection
-        if (collection == null) break
-        
-        collection.lists?.forEach { group ->
-            group.entries?.forEach { entry ->
-                // Null-guard: skip invalid/deleted media entries
-                if (entry.media != null) {
-                    allEntries.add(entry)
-                }
-            }
-        }
-        
-        hasNextChunk = collection.hasNextChunk == true
-        chunk++
-    }
-    
-    // Deduplicate by MediaListEntry.id (distinctBy entry.id, NOT media.id)
-    return allEntries.distinctBy { it.id }
-}
-```
+- **[DataAndStorageScreen.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/main/java/app/lazydex/ui/settings/DataAndStorageScreen.kt)**:
+  - **AniList Tracking Card**: Displays connection status, username, score scale picker, manual "Sync Now" button, and "Disconnect".
+  - **Remote Deletion Warning Banner**: Displays items deleted remotely on AniList with **Unlink (Keep Local)** and **Delete** buttons.
+  - **Runtime Permission**: Requests `POST_NOTIFICATIONS` permission on Android 13+ before launching auth flow.
 
 ---
 
-## 8. Corrected Local Statistics Calculation (SQLite DAO)
+## 7. Verification & Tests
 
-Local statistics in `MediaItemDao.kt` filter strictly by LazyDex's local `category` enum:
+### Automated Unit Tests ([AnilistSyncConflictTest.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/test/java/app/lazydex/data/anilist/AnilistSyncConflictTest.kt), [ScoreConverterTest.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/test/java/app/lazydex/util/ScoreConverterTest.kt), [TitleNormalizerTest.kt](file:///e:/lazyman/rockyxwall/02_Codeing/01_Github/lazydex/app/src/test/java/app/lazydex/util/TitleNormalizerTest.kt))
 
-```sql
-@Query("""
-    SELECT 
-        (SELECT COUNT(*) FROM media_items) as totalCount,
-        (SELECT COUNT(*) FROM media_items WHERE userStatus = 'COMPLETED') as completedCount,
-        (SELECT COALESCE(SUM(currentProgress), 0) FROM media_items) as totalProgress,
-        (SELECT AVG(rating) FROM media_items WHERE rating IS NOT NULL AND rating > 0) as meanRating,
-        (SELECT COUNT(*) FROM media_items WHERE userStatus IN ('READING', 'WATCHING', 'PLAYING', 'REPEATING')) as inProgressCount,
-        (SELECT COALESCE(SUM(currentProgress * COALESCE(durationMinutes, 24)), 0) FROM media_items WHERE category IN ('ANIME', 'MOVIE', 'TV')) as totalWatchMinutes,
-        (SELECT COALESCE(SUM(currentProgress), 0) FROM media_items WHERE category IN ('MANGA', 'NOVEL')) as totalChaptersRead,
-        (SELECT COALESCE(SUM(progressVolumes), 0) FROM media_items WHERE category IN ('MANGA', 'NOVEL')) as totalVolumesRead
-""")
-fun getExtendedStats(): Flow<ExtendedStatsQueryResult>
-```
+Ran `./gradlew test`:
+- **Result**: `BUILD SUCCESSFUL` (19/19 tests passed).
 
----
+### Application Build (`./gradlew assembleDebug`)
 
-## 9. Implementation Order & Verification
-
-1. **Phase P0 (Auth Foundation & Security)**: `TrackLoginActivity.kt`, CSRF `state` parameter validation, `AnilistTokenStore.kt` with `ScoreFormat` preference (defaults to `POINT_5`), and HTTP 401 handling in `AnilistInterceptor.kt`.
-2. **Phase P1 (API & DTOs)**: GraphQL API queries with `$chunk`, `$perPage = 500`, null-safe media DTO guards, `distinctBy { it.id }` deduplication, and rate-limit backoff.
-3. **Phase P2 (DB Migration Room v2 $\rightarrow$ v3)**: Add 13 columns (including `progressVolumes`), set Room migration `MIGRATION_2_3`, update `MediaItemDao.kt` queries.
-4. **Phase P3 (Sync & Recategorization Logic)**: 3-tier item matching, `TitleNormalizer.kt`, category unbind on recategorization, score format conversions (`ScoreConverter.kt`), Newest Timestamp Wins conflict resolution, async background live push.
-5. **Phase P4 (UI & Stats)**: Configurable `ScoreFormat` UI pickers in settings and entry edit screens, updated `StatisticsScreen.kt`.
+Ran `./gradlew assembleDebug`:
+- **Result**: `BUILD SUCCESSFUL`.

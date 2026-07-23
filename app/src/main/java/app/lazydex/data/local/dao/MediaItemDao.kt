@@ -34,7 +34,7 @@ interface MediaItemDao {
         WHERE (:category IS NULL OR category = :category)
         AND (
             :filterType = 'ALL' OR 
-            (:filterType = 'IN_PROGRESS' AND userStatus IN ('READING', 'WATCHING', 'PLAYING')) OR
+            (:filterType = 'IN_PROGRESS' AND userStatus IN ('READING', 'WATCHING', 'PLAYING', 'REPEATING')) OR
             (:filterType = 'EXACT' AND userStatus = :exactStatus)
         )
         ORDER BY dateAdded DESC
@@ -71,6 +71,24 @@ interface MediaItemDao {
     @Query("SELECT * FROM media_items")
     suspend fun getAll(): List<MediaItemEntity>
 
+    @Query("SELECT * FROM media_items WHERE anilistListEntryId = :entryId LIMIT 1")
+    suspend fun getByAnilistEntryId(entryId: Long): MediaItemEntity?
+
+    @Query("SELECT * FROM media_items WHERE sourceUrl = :url LIMIT 1")
+    suspend fun getBySourceUrl(url: String): MediaItemEntity?
+
+    @Query("SELECT * FROM media_items WHERE category = :category AND anilistListEntryId IS NULL")
+    suspend fun getAllUnboundByCategory(category: String): List<MediaItemEntity>
+
+    @Query("SELECT * FROM media_items WHERE anilistListEntryId IS NOT NULL")
+    suspend fun getBoundItems(): List<MediaItemEntity>
+
+    @Query("SELECT * FROM media_items WHERE localUpdatedAt > COALESCE(lastSyncedAt, 0)")
+    suspend fun getPendingSyncItems(): List<MediaItemEntity>
+
+    @Query("SELECT * FROM media_items WHERE syncPendingAction = 'REMOTE_DELETED_PENDING_RESOLUTION'")
+    fun getPendingResolutionItems(): Flow<List<MediaItemEntity>>
+
     @Query("SELECT EXISTS(SELECT 1 FROM media_items WHERE sourceUrl = :url LIMIT 1)")
     suspend fun existsByUrl(url: String): Boolean
 
@@ -86,7 +104,8 @@ interface MediaItemDao {
     @Query("""
         UPDATE media_items
         SET currentProgress = MIN(currentProgress + 1, COALESCE(totalItems, currentProgress + 1)),
-            lastUpdated = :now
+            lastUpdated = :now,
+            localUpdatedAt = :now
         WHERE id = :id
     """)
     suspend fun atomicIncrement(id: String, now: Long)
@@ -97,7 +116,8 @@ interface MediaItemDao {
     @Query("""
         UPDATE media_items
         SET currentProgress = MAX(currentProgress - 1, 0),
-            lastUpdated = :now
+            lastUpdated = :now,
+            localUpdatedAt = :now
         WHERE id = :id
     """)
     suspend fun atomicDecrement(id: String, now: Long)
@@ -105,7 +125,8 @@ interface MediaItemDao {
     @Query("""
         UPDATE media_items
         SET userStatus = :status,
-            lastUpdated = :now
+            lastUpdated = :now,
+            localUpdatedAt = :now
         WHERE id = :id
     """)
     suspend fun updateStatus(id: String, status: String, now: Long)
@@ -127,8 +148,8 @@ interface MediaItemDao {
           (SELECT COUNT(*) FROM media_items) as totalCount,
           (SELECT COUNT(*) FROM media_items WHERE userStatus = 'COMPLETED') as completedCount,
           (SELECT COALESCE(SUM(currentProgress), 0) FROM media_items) as totalProgress,
-          (SELECT AVG(rating) FROM media_items WHERE rating IS NOT NULL) as meanRating,
-          (SELECT COUNT(*) FROM media_items WHERE userStatus IN ('READING', 'WATCHING', 'PLAYING')) as inProgressCount,
+          (SELECT AVG(rating) FROM media_items WHERE rating IS NOT NULL AND rating > 0) as meanRating,
+          (SELECT COUNT(*) FROM media_items WHERE userStatus IN ('READING', 'WATCHING', 'PLAYING', 'REPEATING')) as inProgressCount,
           (SELECT COUNT(*) FROM media_items WHERE category = 'NOVEL') as novelCount,
           (SELECT COUNT(*) FROM media_items WHERE category = 'MANGA') as mangaCount,
           (SELECT COUNT(*) FROM media_items WHERE category = 'ANIME') as animeCount,
@@ -136,4 +157,3 @@ interface MediaItemDao {
     """)
     fun getStats(): Flow<MediaStats>
 }
-

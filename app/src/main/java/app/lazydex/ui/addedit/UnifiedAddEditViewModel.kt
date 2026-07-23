@@ -22,6 +22,11 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 
+import app.lazydex.data.anilist.ALMedia
+import app.lazydex.data.anilist.AnilistApi
+import app.lazydex.data.anilist.AnilistSyncManager
+import app.lazydex.domain.model.MediaFormat
+
 data class AddEditFormState(
     val id: String = "",
     val category: MediaCategory = MediaCategory.NOVEL,
@@ -33,7 +38,7 @@ data class AddEditFormState(
     val currentProgress: String = "0",
     val totalItems: String = "",
     val userStatus: UserStatus = UserStatus.READING,
-    val rating: Double? = null,
+    val rating: Int? = null,
     val notes: String = "",
     val genres: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
@@ -48,13 +53,37 @@ data class AddEditFormState(
     val isDone: Boolean = false,
     val showDeleteConfirm: Boolean = false,
     val showDiscardConfirm: Boolean = false,
-    val isNew: Boolean = true
+    val isNew: Boolean = true,
+
+    // Extended Metadata & Tracking
+    val anilistListEntryId: Long? = null,
+    val isPrivate: Boolean = false,
+    val mediaFormat: String = "",
+    val rawFormat: String = "",
+    val publishingStatus: String = "",
+    val season: String = "",
+    val totalVolumes: String = "",
+    val progressVolumes: String = "0",
+    val durationMinutes: String = "",
+    val sourceMaterial: String = "",
+    val isAdult: Boolean = false,
+    val isDoujin: Boolean = false,
+    val syncPendingAction: String? = null,
+
+    // Tracker Bottom Sheet UI state
+    val showTrackerSheet: Boolean = false,
+    val trackerSearchQuery: String = "",
+    val isTrackerSearching: Boolean = false,
+    val trackerSearchResults: List<ALMedia> = emptyList()
 ) {
     // Form level validation checks
     val isTitleBlank: Boolean get() = title.trim().isBlank()
     
     val parsedProgress: Int? get() = currentProgress.trim().toIntOrNull()
     val parsedTotal: Int? get() = totalItems.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+    val parsedTotalVolumes: Int? get() = totalVolumes.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+    val parsedProgressVolumes: Int get() = progressVolumes.trim().toIntOrNull() ?: 0
+    val parsedDurationMinutes: Int? get() = durationMinutes.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
 
     val isProgressInvalid: Boolean get() {
         val p = parsedProgress ?: return true
@@ -86,7 +115,9 @@ class UnifiedAddEditViewModel(
     private val scraper: MetadataScraper,
     private val okHttpClient: OkHttpClient,
     private val cacheDir: File,
-    private val localCoversDir: File
+    private val localCoversDir: File,
+    private val anilistApi: AnilistApi,
+    private val syncManager: AnilistSyncManager
 ) : ViewModel() {
 
     private val itemId: String? = savedStateHandle["itemId"]
@@ -129,7 +160,20 @@ class UnifiedAddEditViewModel(
                             description = item.description,
                             startDate = item.startDate,
                             endDate = item.endDate,
-                            isNew = false
+                            isNew = false,
+                            anilistListEntryId = item.anilistListEntryId,
+                            isPrivate = item.isPrivate,
+                            mediaFormat = item.mediaFormat?.name ?: item.rawFormat ?: "",
+                            rawFormat = item.rawFormat ?: "",
+                            publishingStatus = item.publishingStatus ?: "",
+                            season = item.season ?: "",
+                            totalVolumes = item.totalVolumes?.toString() ?: "",
+                            progressVolumes = item.progressVolumes.toString(),
+                            durationMinutes = item.durationMinutes?.toString() ?: "",
+                            sourceMaterial = item.sourceMaterial ?: "",
+                            isAdult = item.isAdult,
+                            isDoujin = item.isDoujin,
+                            syncPendingAction = item.syncPendingAction
                         )
                     }
                 }
@@ -189,7 +233,7 @@ class UnifiedAddEditViewModel(
         _formState.value = _formState.value.copy(userStatus = status)
     }
 
-    fun updateRating(rating: Double?) {
+    fun updateRating(rating: Int?) {
         _formState.value = _formState.value.copy(rating = rating)
     }
 
@@ -273,6 +317,88 @@ class UnifiedAddEditViewModel(
         }
     }
 
+    fun showTrackerSheet(show: Boolean) {
+        _formState.value = _formState.value.copy(
+            showTrackerSheet = show,
+            trackerSearchQuery = if (show && _formState.value.trackerSearchQuery.isBlank()) _formState.value.title else _formState.value.trackerSearchQuery
+        )
+    }
+
+    fun updateTrackerSearchQuery(query: String) {
+        _formState.value = _formState.value.copy(trackerSearchQuery = query)
+    }
+
+    fun searchAniList() {
+        val query = _formState.value.trackerSearchQuery.trim()
+        if (query.isBlank()) return
+        _formState.value = _formState.value.copy(isTrackerSearching = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val results = anilistApi.searchMedia(query)
+                _formState.value = _formState.value.copy(
+                    isTrackerSearching = false,
+                    trackerSearchResults = results
+                )
+            } catch (e: Exception) {
+                _formState.value = _formState.value.copy(
+                    isTrackerSearching = false,
+                    errorMsg = "Search failed: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun bindAniListMedia(media: ALMedia) {
+        val formatStr = media.format ?: ""
+        val url = "https://anilist.co/${if (media.format in listOf("MANGA", "ONE_SHOT", "NOVEL")) "manga" else "anime"}/${media.id}"
+        _formState.value = _formState.value.copy(
+            anilistListEntryId = media.id,
+            sourceUrl = if (_formState.value.sourceUrl.isBlank()) url else _formState.value.sourceUrl,
+            rawFormat = formatStr,
+            totalItems = (media.chapters ?: media.volumes)?.toString() ?: _formState.value.totalItems,
+            showTrackerSheet = false,
+            trackerSearchResults = emptyList()
+        )
+    }
+
+    fun unbindAniListMedia() {
+        _formState.value = _formState.value.copy(
+            anilistListEntryId = null,
+            syncPendingAction = null,
+            showTrackerSheet = false
+        )
+    }
+
+    fun updateProgressVolumes(volumes: String) {
+        _formState.value = _formState.value.copy(progressVolumes = volumes)
+    }
+
+    fun updateIsPrivate(isPrivate: Boolean) {
+        _formState.value = _formState.value.copy(isPrivate = isPrivate)
+    }
+
+    fun updateExtendedMetadata(
+        mediaFormat: String? = null,
+        publishingStatus: String? = null,
+        season: String? = null,
+        totalVolumes: String? = null,
+        durationMinutes: String? = null,
+        sourceMaterial: String? = null,
+        isAdult: Boolean? = null,
+        isDoujin: Boolean? = null
+    ) {
+        _formState.value = _formState.value.copy(
+            mediaFormat = mediaFormat ?: _formState.value.mediaFormat,
+            publishingStatus = publishingStatus ?: _formState.value.publishingStatus,
+            season = season ?: _formState.value.season,
+            totalVolumes = totalVolumes ?: _formState.value.totalVolumes,
+            durationMinutes = durationMinutes ?: _formState.value.durationMinutes,
+            sourceMaterial = sourceMaterial ?: _formState.value.sourceMaterial,
+            isAdult = isAdult ?: _formState.value.isAdult,
+            isDoujin = isDoujin ?: _formState.value.isDoujin
+        )
+    }
+
     fun save() {
         val state = _formState.value
         if (!state.canSave) return
@@ -303,7 +429,20 @@ class UnifiedAddEditViewModel(
                 startDate = state.startDate,
                 endDate = state.endDate,
                 lastUpdated = System.currentTimeMillis(),
-                dateAdded = originalItem?.dateAdded ?: System.currentTimeMillis()
+                dateAdded = originalItem?.dateAdded ?: System.currentTimeMillis(),
+                anilistListEntryId = state.anilistListEntryId,
+                isPrivate = state.isPrivate,
+                mediaFormat = MediaFormat.fromString(state.mediaFormat),
+                rawFormat = state.rawFormat.ifEmpty { null },
+                publishingStatus = state.publishingStatus.ifEmpty { null },
+                season = state.season.ifEmpty { null },
+                totalVolumes = state.parsedTotalVolumes,
+                progressVolumes = state.parsedProgressVolumes,
+                durationMinutes = state.parsedDurationMinutes,
+                sourceMaterial = state.sourceMaterial.ifEmpty { null },
+                isAdult = state.isAdult,
+                isDoujin = state.isDoujin,
+                syncPendingAction = state.syncPendingAction
             )
 
             try {

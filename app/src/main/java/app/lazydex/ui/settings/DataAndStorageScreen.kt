@@ -1,7 +1,9 @@
 package app.lazydex.ui.settings
 
+import android.Manifest
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,14 +20,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,6 +60,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.lazydex.data.anilist.model.ScoreFormat
 import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
@@ -67,6 +76,15 @@ fun DataAndStorageScreen(
 
     var includeCoversExport by remember { mutableStateOf(false) }
     var showRestoringProgressBanner by remember { mutableStateOf(true) }
+    var scoreFormatDropdownExpanded by remember { mutableStateOf(false) }
+
+    // Android 13+ Notification permission launcher
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            viewModel.initiateAnilistAuth(context)
+        }
+    )
 
     // Launcher for exporting database (SAF CreateDocument)
     val exportLauncher = rememberLauncherForActivityResult(
@@ -131,8 +149,183 @@ fun DataAndStorageScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
+                .verticalScroll(rememberScrollState())
         ) {
             Spacer(modifier = Modifier.height(8.dp))
+
+            // ==================== ANILIST SYNC SECTION ====================
+            Text(
+                text = "Tracking services",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "AniList Sync",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (state.isAnilistLoggedIn) "Connected as ${state.anilistUsername ?: "User"}" else "Not connected",
+                                fontSize = 12.sp,
+                                color = if (state.isAnilistLoggedIn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                        if (state.isSyncing) {
+                            LinearProgressIndicator(modifier = Modifier.width(60.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (state.isAnilistLoggedIn) {
+                        // Rating format preference
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Rating Scale",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Box {
+                                OutlinedButton(onClick = { scoreFormatDropdownExpanded = true }) {
+                                    Text(state.scoreFormat.displayName, fontSize = 12.sp)
+                                }
+                                DropdownMenu(
+                                    expanded = scoreFormatDropdownExpanded,
+                                    onDismissRequest = { scoreFormatDropdownExpanded = false }
+                                ) {
+                                    ScoreFormat.entries.forEach { format ->
+                                        DropdownMenuItem(
+                                            text = { Text(format.displayName) },
+                                            onClick = {
+                                                viewModel.setScoreFormat(format)
+                                                scoreFormatDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.performManualSync() },
+                                modifier = Modifier.weight(1f),
+                                enabled = !state.isSyncing
+                            ) {
+                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Sync", modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Sync Now", fontSize = 13.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.logoutAnilist() },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Disconnect", fontSize = 13.sp)
+                            }
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    viewModel.initiateAnilistAuth(context)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Connect to AniList", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+
+            // Sync Resolution Warning Banner
+            if (state.pendingResolutionItems.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Sync Warning",
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Sync Conflict: Remote Deletions (${state.pendingResolutionItems.size})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "The following items were deleted on AniList web. Choose whether to keep them as local-only entries or delete them from LazyDex:",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        state.pendingResolutionItems.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = item.title,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = { viewModel.resolveRemoteDeletion(item.id, deleteLocally = false) }) {
+                                    Text("Unlink", fontSize = 11.sp)
+                                }
+                                TextButton(
+                                    onClick = { viewModel.resolveRemoteDeletion(item.id, deleteLocally = true) },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                                ) {
+                                    Text("Delete", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
 
             // ==================== STORAGE SECTION ====================
             Text(
@@ -224,6 +417,8 @@ fun DataAndStorageScreen(
                     onCheckedChange = { showRestoringProgressBanner = it }
                 )
             }
+
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 
@@ -261,11 +456,10 @@ fun DataAndStorageScreen(
         var holdActive by remember { mutableStateOf(false) }
         var holdProgress by remember { mutableStateOf(0f) }
 
-        // Core press-and-hold trigger coroutine loop
         LaunchedEffect(holdActive) {
             if (holdActive) {
                 val startTime = System.currentTimeMillis()
-                val duration = 5000f // 5 seconds
+                val duration = 5000f
                 while (holdActive && holdProgress < 1f) {
                     val elapsed = System.currentTimeMillis() - startTime
                     holdProgress = (elapsed / duration).coerceIn(0f, 1f)
@@ -337,7 +531,6 @@ fun DataAndStorageScreen(
                         )
                     }
                 ) {
-                    // Styled warning button that responds to pointer hold
                     TextButton(
                         onClick = {},
                         colors = ButtonDefaults.textButtonColors(

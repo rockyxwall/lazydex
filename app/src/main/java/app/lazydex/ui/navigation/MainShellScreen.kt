@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -67,6 +68,7 @@ enum class ShellTab {
 fun MainShellScreen(
     onNavigateToAppearance: () -> Unit,
     onNavigateToDataAndStorage: () -> Unit,
+    onNavigateToTracking: () -> Unit,
     onNavigateToAbout: () -> Unit,
     onNavigateToAddItem: (String?) -> Unit,
     onNavigateToEditItem: (String) -> Unit,
@@ -188,6 +190,7 @@ fun MainShellScreen(
                     SettingsTabContent(
                         onNavigateToAppearance = onNavigateToAppearance,
                         onNavigateToDataAndStorage = onNavigateToDataAndStorage,
+                        onNavigateToTracking = onNavigateToTracking,
                         onNavigateToAbout = onNavigateToAbout,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -201,6 +204,7 @@ fun MainShellScreen(
 private fun SettingsTabContent(
     onNavigateToAppearance: () -> Unit,
     onNavigateToDataAndStorage: () -> Unit,
+    onNavigateToTracking: () -> Unit,
     onNavigateToAbout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -237,6 +241,15 @@ private fun SettingsTabContent(
             subtitle = "Theme, date & time format",
             icon = Icons.Default.Palette,
             onClick = onNavigateToAppearance
+        )
+
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+
+        SettingsCategoryItem(
+            title = "Tracking",
+            subtitle = "Sync with tracking services like AniList",
+            icon = Icons.Default.Sync,
+            onClick = onNavigateToTracking
         )
 
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))

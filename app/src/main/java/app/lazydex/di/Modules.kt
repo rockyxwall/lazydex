@@ -3,8 +3,15 @@ package app.lazydex.di
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
+import app.lazydex.data.anilist.AnilistApi
+import app.lazydex.data.anilist.AnilistInterceptor
+import app.lazydex.data.anilist.AnilistRateLimiter
+import app.lazydex.data.anilist.AnilistSyncManager
+import app.lazydex.data.anilist.AnilistSyncQueueWorker
+import app.lazydex.data.anilist.AnilistTokenStore
 import app.lazydex.data.local.LazyDexDatabase
 import app.lazydex.data.local.MIGRATION_1_2
+import app.lazydex.data.local.Migration2To3
 import app.lazydex.data.local.ThemePreferences
 import app.lazydex.data.repository.MediaRepositoryImpl
 import app.lazydex.domain.repository.MediaRepository
@@ -25,6 +32,7 @@ import app.lazydex.ui.statistics.StatisticsViewModel
 import okhttp3.OkHttpClient
 import org.koin.android.ext.koin.androidContext
 import org.koin.androidx.viewmodel.dsl.viewModel
+import org.koin.androidx.workmanager.dsl.workerOf
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 import java.io.File
@@ -38,7 +46,7 @@ val databaseModule = module {
             "lazydex_db"
         )
         .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-        .addMigrations(MIGRATION_1_2)
+        .addMigrations(MIGRATION_1_2, Migration2To3(androidContext()))
         .fallbackToDestructiveMigration()
         .addCallback(object : RoomDatabase.Callback() {
             override fun onDestructiveMigration(db: SupportSQLiteDatabase) {
@@ -97,6 +105,25 @@ val scraperModule = module {
     single { MetadataScraper(get(), get()) }
 }
 
+val anilistModule = module {
+    single { AnilistTokenStore(androidContext()) }
+    single { AnilistRateLimiter(androidContext()) }
+    single { AnilistInterceptor(androidContext(), get()) }
+    single(named("anilistHttpClient")) {
+        OkHttpClient.Builder()
+            .dns(SafeDns())
+            .connectTimeout(Duration.ofSeconds(10))
+            .readTimeout(Duration.ofSeconds(15))
+            .writeTimeout(Duration.ofSeconds(10))
+            .addInterceptor(get<AnilistRateLimiter>())
+            .addInterceptor(get<AnilistInterceptor>())
+            .build()
+    }
+    single { AnilistApi(get(named("anilistHttpClient"))) }
+    single { AnilistSyncManager(get(), get(), get()) }
+    workerOf(::AnilistSyncQueueWorker)
+}
+
 val storageModule = module {
     single(named("cacheDir")) { androidContext().cacheDir }
     single(named("coversDir")) { File(androidContext().filesDir, "covers") }
@@ -113,14 +140,19 @@ val viewModelModule = module {
             scraper = get(),
             okHttpClient = get(),
             cacheDir = get(named("cacheDir")),
-            localCoversDir = get(named("coversDir"))
+            localCoversDir = get(named("coversDir")),
+            anilistApi = get(),
+            syncManager = get()
         )
     }
     viewModel {
         SettingsViewModel(
             repository = get(),
             themePreferences = get(),
-            localCoversDir = get(named("coversDir"))
+            localCoversDir = get(named("coversDir")),
+            tokenStore = get(),
+            syncManager = get(),
+            dao = get()
         )
     }
 }
@@ -130,6 +162,7 @@ val appModule = listOf(
     repositoryModule,
     preferencesModule,
     scraperModule,
+    anilistModule,
     storageModule,
     viewModelModule
 )

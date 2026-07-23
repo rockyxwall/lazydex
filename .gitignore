@@ -19,4 +19,5 @@ graphify-out/
 *.bak
 *.tmp
 /app/schemas/*/
+*.apk
 nul

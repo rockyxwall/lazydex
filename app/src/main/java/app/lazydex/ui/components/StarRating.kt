@@ -27,20 +27,19 @@ import app.lazydex.ui.theme.Rating5
 
 @Composable
 fun StarRating(
-    rating: Double?,
+    rating: Int?,
     modifier: Modifier = Modifier,
     isEditable: Boolean = false,
-    onRatingChanged: (Double?) -> Unit = {}
+    onRatingChanged: (Int?) -> Unit = {}
 ) {
-    val displayRating = rating ?: 0.0
+    val displayFiveStar = (rating ?: 0) / 20.0
 
-    // Assign color based on rating range
     val starColor = when {
-        rating == null -> Color.Gray
-        rating >= 4.5 -> Rating5
-        rating >= 3.5 -> Rating4
-        rating >= 2.5 -> Rating3
-        rating >= 1.5 -> Rating2
+        rating == null || rating == 0 -> Color.Gray
+        rating >= 90 -> Rating5
+        rating >= 70 -> Rating4
+        rating >= 50 -> Rating3
+        rating >= 30 -> Rating2
         else -> Rating1
     }
 
@@ -52,9 +51,9 @@ fun StarRating(
                 val tappedStarIndex = (offset.x / starWidth).toInt() // 0 to 4
                 val fraction = offset.x % starWidth
                 val isHalf = fraction < starWidth / 2f
-                val newRating = tappedStarIndex + 1f - (if (isHalf) 0.5f else 0f)
-                val clamped = newRating.coerceIn(1.0f, 5.0f).toDouble()
-                onRatingChanged(clamped)
+                val newFiveStar = tappedStarIndex + 1f - (if (isHalf) 0.5f else 0f)
+                val clampedScore = (newFiveStar * 20.0).toInt().coerceIn(10, 100)
+                onRatingChanged(clampedScore)
             }
         }
     } else {
@@ -67,8 +66,8 @@ fun StarRating(
     ) {
         for (i in 1..5) {
             val icon = when {
-                displayRating >= i -> Icons.Default.Star
-                displayRating >= i - 0.5 -> Icons.Default.StarHalf
+                displayFiveStar >= i -> Icons.Default.Star
+                displayFiveStar >= i - 0.5 -> Icons.Default.StarHalf
                 else -> Icons.Default.StarBorder
             }
             Icon(
@@ -79,10 +78,10 @@ fun StarRating(
             )
         }
 
-        if (rating != null) {
+        if (rating != null && rating > 0) {
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = String.format("%.1f/5.0", rating),
+                text = String.format("%.1f/5.0", displayFiveStar),
                 color = starColor,
                 fontSize = 12.sp,
                 style = MaterialTheme.typography.labelSmall

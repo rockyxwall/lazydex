@@ -19,7 +19,7 @@ import app.lazydex.ui.theme.StatusPlanTo
 @Composable
 fun StatusBadge(status: UserStatus, modifier: Modifier = Modifier) {
     val color = when (status) {
-        UserStatus.READING, UserStatus.WATCHING, UserStatus.PLAYING -> StatusInProgress
+        UserStatus.READING, UserStatus.WATCHING, UserStatus.PLAYING, UserStatus.REPEATING -> StatusInProgress
         UserStatus.COMPLETED -> StatusCompleted
         UserStatus.ON_HOLD -> StatusOnHold
         UserStatus.DROPPED -> StatusDropped

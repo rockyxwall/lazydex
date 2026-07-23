@@ -5,6 +5,7 @@ import app.lazydex.data.local.converter.Converters
 import app.lazydex.data.local.dao.MediaItemDao
 import app.lazydex.data.local.entity.MediaItemEntity
 import app.lazydex.domain.model.MediaCategory
+import app.lazydex.domain.model.MediaFormat
 import app.lazydex.domain.model.MediaItem
 import app.lazydex.domain.model.MediaStats
 import app.lazydex.domain.model.StatusFilter
@@ -69,7 +70,7 @@ class MediaRepositoryImpl(
     override fun observeStatusCounts(category: MediaCategory?): Flow<Map<StatusFilter, Int>> = dao.observeStatusCounts(category?.name)
         .map { list ->
             val raw = list.associate { it.userStatus to it.count }
-            val inProgress = (raw["READING"] ?: 0) + (raw["WATCHING"] ?: 0) + (raw["PLAYING"] ?: 0)
+            val inProgress = (raw["READING"] ?: 0) + (raw["WATCHING"] ?: 0) + (raw["PLAYING"] ?: 0) + (raw["REPEATING"] ?: 0)
             mapOf(
                 StatusFilter.ALL to raw.values.sum(),
                 StatusFilter.IN_PROGRESS to inProgress,
@@ -140,7 +141,8 @@ class MediaRepositoryImpl(
                 id = finalId,
                 coverImagePath = finalCoverPath,
                 dateAdded = now,
-                lastUpdated = now
+                lastUpdated = now,
+                localUpdatedAt = now
             )
         ).normalize()
 
@@ -175,10 +177,16 @@ class MediaRepositoryImpl(
             ""
         }
 
+        // Recategorization check: unbind AniList ID if moved to non-sync category
+        val isSyncableCategory = item.category in listOf(MediaCategory.ANIME, MediaCategory.MANGA, MediaCategory.NOVEL)
+        val finalAnilistEntryId = if (isSyncableCategory) item.anilistListEntryId else null
+
         val finalItem = applyAutoDates(
             item.copy(
                 coverImagePath = finalCoverPath,
-                lastUpdated = now
+                lastUpdated = now,
+                localUpdatedAt = now,
+                anilistListEntryId = finalAnilistEntryId
             )
         ).normalize()
 
@@ -207,10 +215,12 @@ class MediaRepositoryImpl(
         val newProgress = if (total != null && total >= 0) minOf(existing.currentProgress + 1, total) else existing.currentProgress + 1
         val isNowCompleted = total != null && newProgress >= total
         val updatedStatus = if (isNowCompleted) UserStatus.COMPLETED else existing.userStatus
+        val now = System.currentTimeMillis()
         val updatedItem = applyAutoDates(existing.copy(
             currentProgress = newProgress,
             userStatus = updatedStatus,
-            lastUpdated = System.currentTimeMillis()
+            lastUpdated = now,
+            localUpdatedAt = now
         ))
         dao.upsert(updatedItem.normalize().toEntity())
     }
@@ -222,19 +232,23 @@ class MediaRepositoryImpl(
         val isWasCompleted = existing.userStatus == UserStatus.COMPLETED
         val isNowBelowTotal = total != null && newProgress < total
         val updatedStatus = if (isWasCompleted && isNowBelowTotal) categoryDefaultInProgress(existing.category) else existing.userStatus
+        val now = System.currentTimeMillis()
         val updatedItem = applyAutoDates(existing.copy(
             currentProgress = newProgress,
             userStatus = updatedStatus,
-            lastUpdated = System.currentTimeMillis()
+            lastUpdated = now,
+            localUpdatedAt = now
         ))
         dao.upsert(updatedItem.normalize().toEntity())
     }
 
     override suspend fun setStatus(id: String, status: UserStatus): Unit = withContext(Dispatchers.IO) {
         val existing = dao.getById(id)?.toDomain() ?: return@withContext
+        val now = System.currentTimeMillis()
         val updated = applyAutoDates(existing.copy(
             userStatus = status,
-            lastUpdated = System.currentTimeMillis()
+            lastUpdated = now,
+            localUpdatedAt = now
         ))
         dao.upsert(updated.normalize().toEntity())
     }
@@ -251,7 +265,7 @@ class MediaRepositoryImpl(
     }
 
     private fun applyAutoDates(item: MediaItem): MediaItem {
-        val isInProgress = item.userStatus in listOf(UserStatus.READING, UserStatus.WATCHING, UserStatus.PLAYING)
+        val isInProgress = item.userStatus in listOf(UserStatus.READING, UserStatus.WATCHING, UserStatus.PLAYING, UserStatus.REPEATING)
         val isCompleted = item.userStatus == UserStatus.COMPLETED
         val isPlanTo = item.userStatus == UserStatus.PLAN_TO
 
@@ -304,7 +318,22 @@ class MediaRepositoryImpl(
                 startDate = startDate,
                 endDate = endDate,
                 lastUpdated = lastUpdated,
-                dateAdded = dateAdded
+                dateAdded = dateAdded,
+                localUpdatedAt = if (localUpdatedAt > 0) localUpdatedAt else lastUpdated,
+                lastSyncedAt = lastSyncedAt,
+                anilistListEntryId = anilistListEntryId,
+                isPrivate = isPrivate,
+                mediaFormat = MediaFormat.fromString(mediaFormat),
+                rawFormat = rawFormat,
+                publishingStatus = publishingStatus,
+                season = season,
+                totalVolumes = totalVolumes,
+                progressVolumes = progressVolumes,
+                durationMinutes = durationMinutes,
+                sourceMaterial = sourceMaterial,
+                isAdult = isAdult,
+                isDoujin = isDoujin,
+                syncPendingAction = syncPendingAction
             )
         } catch (e: Exception) {
             null
@@ -335,8 +364,22 @@ class MediaRepositoryImpl(
             startDate = startDate,
             endDate = endDate,
             lastUpdated = lastUpdated,
-            dateAdded = dateAdded
+            dateAdded = dateAdded,
+            localUpdatedAt = localUpdatedAt,
+            lastSyncedAt = lastSyncedAt,
+            anilistListEntryId = anilistListEntryId,
+            isPrivate = isPrivate,
+            mediaFormat = mediaFormat?.name,
+            rawFormat = rawFormat,
+            publishingStatus = publishingStatus,
+            season = season,
+            totalVolumes = totalVolumes,
+            progressVolumes = progressVolumes,
+            durationMinutes = durationMinutes,
+            sourceMaterial = sourceMaterial,
+            isAdult = isAdult,
+            isDoujin = isDoujin,
+            syncPendingAction = syncPendingAction
         )
     }
 }
-

@@ -1,21 +1,26 @@
 package app.lazydex.ui.settings
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.lazydex.backup.BackupManager
 import app.lazydex.backup.BackupProcessor
 import app.lazydex.backup.ImportedBackup
+import app.lazydex.data.anilist.AnilistSyncManager
+import app.lazydex.data.anilist.AnilistTokenStore
+import app.lazydex.data.anilist.model.ScoreFormat
 import app.lazydex.data.local.ThemePreferences
+import app.lazydex.data.local.dao.MediaItemDao
+import app.lazydex.data.local.entity.MediaItemEntity
 import app.lazydex.domain.repository.MediaRepository
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 
 data class SettingsUiState(
     val themeMode: String = "DARK",
@@ -26,13 +31,23 @@ data class SettingsUiState(
     val isImporting: Boolean = false,
     val errorMsg: String? = null,
     val successMsg: String? = null,
-    val showExportCoversDialog: Boolean = false
+    val showExportCoversDialog: Boolean = false,
+
+    // AniList Sync State
+    val isAnilistLoggedIn: Boolean = false,
+    val anilistUsername: String? = null,
+    val scoreFormat: ScoreFormat = ScoreFormat.POINT_5,
+    val isSyncing: Boolean = false,
+    val pendingResolutionItems: List<MediaItemEntity> = emptyList()
 )
 
 class SettingsViewModel(
     private val repository: MediaRepository,
     private val themePreferences: ThemePreferences,
-    private val localCoversDir: File
+    private val localCoversDir: File,
+    private val tokenStore: AnilistTokenStore,
+    private val syncManager: AnilistSyncManager,
+    private val dao: MediaItemDao
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -52,6 +67,87 @@ class SettingsViewModel(
         viewModelScope.launch {
             themePreferences.coverTheming.collect { coverTheme ->
                 _uiState.value = _uiState.value.copy(coverTheming = coverTheme)
+            }
+        }
+        viewModelScope.launch {
+            dao.getPendingResolutionItems().collect { items ->
+                _uiState.value = _uiState.value.copy(pendingResolutionItems = items)
+            }
+        }
+        refreshAnilistState()
+    }
+
+    fun refreshAnilistState() {
+        viewModelScope.launch {
+            val loggedIn = tokenStore.isLoggedIn()
+            val username = tokenStore.getUsername()
+            val format = tokenStore.getScoreFormat()
+            _uiState.value = _uiState.value.copy(
+                isAnilistLoggedIn = loggedIn,
+                anilistUsername = username,
+                scoreFormat = format
+            )
+        }
+    }
+
+    fun initiateAnilistAuth(context: Context) {
+        viewModelScope.launch {
+            val stateUuid = UUID.randomUUID().toString()
+            tokenStore.addOAuthState(stateUuid)
+            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=${AnilistTokenStore.DEFAULT_CLIENT_ID}&response_type=token&redirect_uri=lazydex://anilist-auth&state=$stateUuid"
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }
+    }
+
+    fun logoutAnilist() {
+        viewModelScope.launch {
+            tokenStore.clearToken()
+            refreshAnilistState()
+            _uiState.value = _uiState.value.copy(successMsg = "Disconnected from AniList")
+        }
+    }
+
+    fun performManualSync() {
+        _uiState.value = _uiState.value.copy(isSyncing = true, errorMsg = null, successMsg = null)
+        viewModelScope.launch {
+            try {
+                syncManager.performFullSync()
+                _uiState.value = _uiState.value.copy(
+                    isSyncing = false,
+                    successMsg = "AniList sync completed"
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isSyncing = false,
+                    errorMsg = "Sync failed: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun setScoreFormat(format: ScoreFormat) {
+        viewModelScope.launch {
+            tokenStore.saveScoreFormat(format)
+            _uiState.value = _uiState.value.copy(scoreFormat = format)
+        }
+    }
+
+    fun resolveRemoteDeletion(itemId: String, deleteLocally: Boolean) {
+        viewModelScope.launch {
+            if (deleteLocally) {
+                repository.delete(itemId)
+            } else {
+                val entity = dao.getById(itemId)
+                if (entity != null) {
+                    val updated = entity.copy(
+                        anilistListEntryId = null,
+                        syncPendingAction = null
+                    )
+                    dao.upsert(updated)
+                }
             }
         }
     }
@@ -106,7 +202,6 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 val imported = BackupManager.readZipContent(context, uri)
-
                 _uiState.value = _uiState.value.copy(
                     isImporting = false,
                     importedBackup = imported
@@ -136,11 +231,8 @@ class SettingsViewModel(
                 val local = repository.getAll()
                 val mergeResult = BackupProcessor.merge(local, imported.items, imported.schemaVersion)
 
-                
-                // Ensure local covers directory exists
                 if (!localCoversDir.exists()) localCoversDir.mkdirs()
 
-                // Map items to update their cover image paths after file extraction
                 val finalItems = mergeResult.mergedItems.map { mergedItem ->
                     val matchedImported = imported.items.firstOrNull {
                         it.id == mergedItem.id || (it.sourceUrl != null && it.sourceUrl == mergedItem.sourceUrl)
@@ -150,14 +242,12 @@ class SettingsViewModel(
                         if (srcFile.exists()) {
                             val destFile = File(localCoversDir, mergedItem.id)
                             srcFile.copyTo(destFile, overwrite = true)
-                            // Update path to point to the newly restored file
                             return@map mergedItem.copy(coverImagePath = destFile.absolutePath)
                         }
                     }
                     mergedItem
                 }
 
-                // Save updated items to database
                 repository.replaceAll(finalItems)
 
                 _uiState.value = _uiState.value.copy(
@@ -182,13 +272,11 @@ class SettingsViewModel(
         _uiState.value = _uiState.value.copy(isImporting = true)
         viewModelScope.launch {
             try {
-                // Wipe existing covers
                 if (localCoversDir.exists()) {
                     localCoversDir.deleteRecursively()
                 }
                 localCoversDir.mkdirs()
 
-                // Map items to update their cover image paths while restoring all covers
                 val finalItems = imported.items.map { item ->
                     val srcFile = File(imported.tempCoversDir, item.id)
                     if (srcFile.exists()) {
@@ -200,7 +288,6 @@ class SettingsViewModel(
                     }
                 }
 
-                // Save database
                 repository.replaceAll(finalItems)
 
                 _uiState.value = _uiState.value.copy(

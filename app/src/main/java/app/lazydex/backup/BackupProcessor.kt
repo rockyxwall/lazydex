@@ -137,7 +137,7 @@ object BackupProcessor {
         currentProgress = currentProgress,
         totalItems = totalItems,
         userStatus = userStatus.name,
-        rating = rating,
+        rating = rating?.toDouble(),
         notes = notes.ifBlank { null },
         genres = genres.ifEmpty { null },
         tags = tags.ifEmpty { null },
@@ -157,6 +157,11 @@ object BackupProcessor {
         val safeTotal = totalItems?.takeIf { it >= 0 }
         val safeLastUpdated = if (lastUpdated != null && lastUpdated > 0L) lastUpdated else 0L
         val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else System.currentTimeMillis()
+        val safeRating = rating?.let {
+            if (it <= 5.0) (it * 20.0).toInt()
+            else if (it <= 10.0) (it * 10.0).toInt()
+            else it.toInt()
+        }?.coerceIn(0, 100)
 
         return MediaItem(
             id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
@@ -169,7 +174,7 @@ object BackupProcessor {
             currentProgress = safeProgress,
             totalItems = safeTotal,
             userStatus = safeStatus,
-            rating = rating,
+            rating = safeRating,
             notes = notes?.trim() ?: "",
             genres = genres ?: emptyList(),
             tags = tags ?: emptyList(),

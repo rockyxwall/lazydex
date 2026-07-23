@@ -50,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -61,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -414,6 +416,50 @@ fun UnifiedAddEditScreen(
                                 label = { Text(status.displayName, fontSize = 11.sp) },
                                 colors = chipColors
                             )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Tracking Card
+                    androidx.compose.material3.Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { viewModel.showTrackerSheet(true) },
+                        colors = androidx.compose.material3.CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(androidx.compose.foundation.shape.CircleShape)
+                                    .background(Color(0xFF02A9FF)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("AL", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Tracking (AniList)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (state.anilistListEntryId != null) "Bound (#${state.anilistListEntryId})" else "Unbound (Tap to search & bind)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (state.anilistListEntryId != null) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(onClick = { viewModel.showTrackerSheet(true) }) {
+                                Text(if (state.anilistListEntryId != null) "Manage" else "Bind")
+                            }
                         }
                     }
 
@@ -914,6 +960,36 @@ fun UnifiedAddEditScreen(
                     Text("Keep Editing")
                 }
             }
+        )
+    }
+
+    // Tracker Bottom Sheet
+    if (state.showTrackerSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        app.lazydex.ui.components.TrackerBottomSheet(
+            sheetState = sheetState,
+            onDismissRequest = { viewModel.showTrackerSheet(false) },
+            isBound = state.anilistListEntryId != null,
+            anilistListEntryId = state.anilistListEntryId,
+            title = state.title,
+            currentProgress = state.currentProgress,
+            totalItems = state.totalItems,
+            progressVolumes = state.progressVolumes,
+            userStatus = state.userStatus,
+            rating = state.rating,
+            isPrivate = state.isPrivate,
+            sourceUrl = state.sourceUrl.ifEmpty { null },
+            isSearching = state.isTrackerSearching,
+            searchQuery = state.trackerSearchQuery,
+            searchResults = state.trackerSearchResults,
+            onSearchQueryChange = { viewModel.updateTrackerSearchQuery(it) },
+            onPerformSearch = { viewModel.searchAniList() },
+            onBindMedia = { viewModel.bindAniListMedia(it) },
+            onUnbindMedia = { viewModel.unbindAniListMedia() },
+            onStatusChange = { viewModel.updateStatus(it) },
+            onProgressChange = { viewModel.updateProgress(it) },
+            onProgressVolumesChange = { viewModel.updateProgressVolumes(it) },
+            onPrivateChange = { viewModel.updateIsPrivate(it) }
         )
     }
 }

@@ -30,6 +30,9 @@ object DataAndStorageRoute
 @Serializable
 object AboutRoute
 
+@Serializable
+object TrackingRoute
+
 @Composable
 fun LazyDexNavGraph(
     navController: NavHostController,
@@ -53,6 +56,9 @@ fun LazyDexNavGraph(
                 },
                 onNavigateToDataAndStorage = {
                     navController.navigate(DataAndStorageRoute)
+                },
+                onNavigateToTracking = {
+                    navController.navigate(TrackingRoute)
                 },
                 onNavigateToAbout = {
                     navController.navigate(AboutRoute)
@@ -78,6 +84,13 @@ fun LazyDexNavGraph(
         }
         composable<DataAndStorageRoute> {
             DataAndStorageScreen(
+                onBack = {
+                    navController.popBackStack()
+                }
+            )
+        }
+        composable<TrackingRoute> {
+            app.lazydex.ui.settings.TrackingSettingsScreen(
                 onBack = {
                     navController.popBackStack()
                 }
