@@ -8,6 +8,9 @@ import app.lazydex.data.local.entity.MediaItemEntity
 import app.lazydex.domain.model.MediaStats
 import kotlinx.coroutines.flow.Flow
 
+data class CategoryCount(val category: String, val count: Int)
+data class StatusCount(val userStatus: String, val count: Int)
+
 @Dao
 interface MediaItemDao {
     @Query("SELECT * FROM media_items ORDER BY dateAdded DESC")
@@ -15,6 +18,12 @@ interface MediaItemDao {
 
     @Query("SELECT * FROM media_items WHERE category = :category ORDER BY dateAdded DESC")
     fun observeByCategory(category: String): Flow<List<MediaItemEntity>>
+
+    @Query("SELECT category, COUNT(*) as count FROM media_items GROUP BY category")
+    fun observeCategoryCounts(): Flow<List<CategoryCount>>
+
+    @Query("SELECT userStatus, COUNT(*) as count FROM media_items WHERE (:category IS NULL OR category = :category) GROUP BY userStatus")
+    fun observeStatusCounts(category: String?): Flow<List<StatusCount>>
 
     /**
      * Filtered observation that supports category and status filters.
@@ -127,3 +136,4 @@ interface MediaItemDao {
     """)
     fun getStats(): Flow<MediaStats>
 }
+
