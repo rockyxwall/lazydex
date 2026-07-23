@@ -16,7 +16,10 @@ import kotlinx.serialization.Serializable
 object MainShellRoute
 
 @Serializable
-data class AddEditRoute(val itemId: String? = null)
+data class AddEditRoute(
+    val itemId: String? = null,
+    val initialUrl: String? = null
+)
 
 @Serializable
 object AppearanceRoute
@@ -39,11 +42,11 @@ fun LazyDexNavGraph(
     ) {
         composable<MainShellRoute> {
             MainShellScreen(
-                onNavigateToAddItem = {
-                    navController.navigate(AddEditRoute(itemId = null))
+                onNavigateToAddItem = { initialUrl ->
+                    navController.navigate(AddEditRoute(itemId = null, initialUrl = initialUrl))
                 },
                 onNavigateToEditItem = { itemId ->
-                    navController.navigate(AddEditRoute(itemId = itemId))
+                    navController.navigate(AddEditRoute(itemId = itemId, initialUrl = null))
                 },
                 onNavigateToAppearance = {
                     navController.navigate(AppearanceRoute)
@@ -56,6 +59,7 @@ fun LazyDexNavGraph(
                 }
             )
         }
+
         composable<AddEditRoute> { backStackEntry ->
             val route = backStackEntry.toRoute<AddEditRoute>()
             UnifiedAddEditScreen(

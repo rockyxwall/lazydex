@@ -4,12 +4,21 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 import app.lazydex.data.local.LazyDexDatabase
+import app.lazydex.data.local.MIGRATION_1_2
 import app.lazydex.data.local.ThemePreferences
 import app.lazydex.data.repository.MediaRepositoryImpl
 import app.lazydex.domain.repository.MediaRepository
 import app.lazydex.scraper.MetadataScraper
 import app.lazydex.scraper.SafeDns
+import app.lazydex.scraper.source.AniListSource
+import app.lazydex.scraper.source.GenericSource
+import app.lazydex.scraper.source.MangaDexSource
+import app.lazydex.scraper.source.NovelUpdatesSource
+import app.lazydex.scraper.source.RoyalRoadSource
+import app.lazydex.scraper.source.SourceRegistry
+import app.lazydex.scraper.source.WtrLabSource
 import app.lazydex.ui.addedit.UnifiedAddEditViewModel
+import app.lazydex.ui.browser.BrowserViewModel
 import app.lazydex.ui.dex.DexViewModel
 import app.lazydex.ui.settings.SettingsViewModel
 import app.lazydex.ui.statistics.StatisticsViewModel
@@ -29,6 +38,7 @@ val databaseModule = module {
             "lazydex_db"
         )
         .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+        .addMigrations(MIGRATION_1_2)
         .fallbackToDestructiveMigration()
         .addCallback(object : RoomDatabase.Callback() {
             override fun onDestructiveMigration(db: SupportSQLiteDatabase) {
@@ -66,7 +76,25 @@ val scraperModule = module {
             .followSslRedirects(true)
             .build()
     }
-    single { MetadataScraper(get()) }
+    single { WtrLabSource(get()) }
+    single { NovelUpdatesSource(get()) }
+    single { RoyalRoadSource(get()) }
+    single { MangaDexSource(get()) }
+    single { AniListSource(get()) }
+    single { GenericSource(get()) }
+    single {
+        SourceRegistry(
+            listOf(
+                get<WtrLabSource>(),
+                get<NovelUpdatesSource>(),
+                get<RoyalRoadSource>(),
+                get<MangaDexSource>(),
+                get<AniListSource>(),
+                get<GenericSource>()
+            )
+        )
+    }
+    single { MetadataScraper(get(), get()) }
 }
 
 val storageModule = module {
@@ -77,6 +105,7 @@ val storageModule = module {
 val viewModelModule = module {
     viewModel { DexViewModel(get()) }
     viewModel { StatisticsViewModel(get()) }
+    viewModel { BrowserViewModel(get()) }
     viewModel {
         UnifiedAddEditViewModel(
             savedStateHandle = get(),
