@@ -252,7 +252,7 @@ private fun SettingsTabContent(
 
         SettingsCategoryItem(
             title = "About",
-            subtitle = "LazyDex Stable ${BuildConfig.VERSION_NAME}",
+            subtitle = "LazyDex Beta v${BuildConfig.VERSION_NAME}",
             icon = Icons.Default.Info,
             onClick = onNavigateToAbout
         )
