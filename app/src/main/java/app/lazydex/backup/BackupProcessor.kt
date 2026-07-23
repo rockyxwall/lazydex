@@ -13,7 +13,7 @@ import java.util.UUID
 
 @Serializable
 data class BackupEnvelopeDto(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val items: List<MediaItemBackupDto>? = null
 )
 
@@ -30,8 +30,19 @@ data class MediaItemBackupDto(
     val userStatus: String? = null,
     val rating: Double? = null,
     val notes: String? = null,
+    val genres: List<String>? = null,
+    val tags: List<String>? = null,
+    val author: String? = null,
+    val description: String? = null,
+    val startDate: Long? = null,
+    val endDate: Long? = null,
     val lastUpdated: Long? = null,
     val dateAdded: Long? = null
+)
+
+data class DeserializedBackup(
+    val schemaVersion: Int,
+    val items: List<MediaItem>
 )
 
 data class MergeResult(
@@ -46,67 +57,75 @@ object BackupProcessor {
     }
 
     suspend fun serialize(items: List<MediaItem>): String = withContext(Dispatchers.Default) {
-        val envelope = BackupEnvelopeDto(items = items.map { it.toDto() })
+        val envelope = BackupEnvelopeDto(schemaVersion = 2, items = items.map { it.toDto() })
         backupJson.encodeToString(envelope)
     }
 
-    suspend fun deserialize(json: String): List<MediaItem> = withContext(Dispatchers.Default) {
+    suspend fun deserialize(json: String): DeserializedBackup = withContext(Dispatchers.Default) {
         if (json.isBlank()) throw IllegalArgumentException("Backup file is empty")
         val envelope = backupJson.decodeFromString<BackupEnvelopeDto>(json)
-        if (envelope.schemaVersion > 1) {
+        if (envelope.schemaVersion > 2) {
             throw IllegalArgumentException("Unsupported backup schema version: ${envelope.schemaVersion}")
         }
-        envelope.items?.mapNotNull { dto -> dto.toDomain() } ?: emptyList()
+        val items = envelope.items?.mapNotNull { dto -> dto.toDomain() } ?: emptyList()
+        DeserializedBackup(schemaVersion = envelope.schemaVersion, items = items)
     }
 
-    suspend fun merge(local: List<MediaItem>, imported: List<MediaItem>): MergeResult =
-        withContext(Dispatchers.Default) {
-            val localById = local.associateBy { it.id }
-            val localByUrl = local.filter { it.sourceUrl != null }.associateBy { it.sourceUrl?.let { url -> UrlNormalizer.normalize(url) } }
-            
-            val result = LinkedHashMap<String, MediaItem>()
-            val coverIdsToRestore = mutableSetOf<String>()
-            
-            // Start with all local items
-            local.forEach { result[it.id] = it }
-            
-            imported.forEachIndexed { index, importedItem ->
-                // Check duplicate by URL first, then by ID
-                val normalizedImportedUrl = importedItem.sourceUrl?.let { UrlNormalizer.normalize(it) }
-                val existingLocal = localById[importedItem.id] ?: normalizedImportedUrl?.let { localByUrl[it] }
-                
-                if (existingLocal == null) {
-                    // Pure addition: imported item is completely new
-                    val finalTime = if (importedItem.lastUpdated > 0L) importedItem.lastUpdated
-                                    else System.currentTimeMillis() - index
-                    val newItem = importedItem.copy(lastUpdated = finalTime).normalize()
-                    result[newItem.id] = newItem
-                    
-                    // We must restore the cover from the imported zip using the imported item's ID
-                    coverIdsToRestore.add(importedItem.id) 
-                } else {
-                    // Conflict: Resolve who is newer
-                    if (importedItem.lastUpdated > existingLocal.lastUpdated) {
-                        // Imported item wins: adopt local ID, replace local item
-                        val winningItem = importedItem.copy(id = existingLocal.id).normalize()
-                        result[existingLocal.id] = winningItem
-                        
-                        // We restore cover from ZIP.
-                        // Note: inside ZIP the cover is stored under the imported item's ID (importedItem.id),
-                        // but it should be saved locally under the local ID (existingLocal.id) during restoration.
-                        // We add the imported item's ID to coverIdsToRestore so that we extract it and map it to the local ID.
-                        coverIdsToRestore.add(importedItem.id)
+    suspend fun merge(
+        local: List<MediaItem>,
+        imported: List<MediaItem>,
+        importedSchemaVersion: Int = 2
+    ): MergeResult = withContext(Dispatchers.Default) {
+        val localById = local.associateBy { it.id }
+        val localByUrl = local.filter { it.sourceUrl != null }.associateBy { it.sourceUrl?.let { url -> UrlNormalizer.normalize(url) } }
+
+        val result = LinkedHashMap<String, MediaItem>()
+        val coverIdsToRestore = mutableSetOf<String>()
+
+        // Start with all local items
+        local.forEach { result[it.id] = it }
+
+        imported.forEachIndexed { index, importedItem ->
+            val normalizedImportedUrl = importedItem.sourceUrl?.let { UrlNormalizer.normalize(it) }
+            val existingLocal = localById[importedItem.id] ?: normalizedImportedUrl?.let { localByUrl[it] }
+
+            if (existingLocal == null) {
+                // Pure addition
+                val finalTime = if (importedItem.lastUpdated > 0L) importedItem.lastUpdated
+                                else System.currentTimeMillis() - index
+                val newItem = importedItem.copy(lastUpdated = finalTime).normalize()
+                result[newItem.id] = newItem
+                coverIdsToRestore.add(importedItem.id)
+            } else {
+                // Conflict: Resolve who is newer
+                if (importedItem.lastUpdated > existingLocal.lastUpdated) {
+                    val winningItem = if (importedSchemaVersion < 2) {
+                        // Legacy v1 backup merge: preserve local v2 metadata if imported lacks it
+                        importedItem.copy(
+                            id = existingLocal.id,
+                            genres = importedItem.genres.ifEmpty { existingLocal.genres },
+                            tags = importedItem.tags.ifEmpty { existingLocal.tags },
+                            author = importedItem.author.ifBlank { existingLocal.author },
+                            description = importedItem.description.ifBlank { existingLocal.description },
+                            startDate = importedItem.startDate ?: existingLocal.startDate,
+                            endDate = importedItem.endDate ?: existingLocal.endDate
+                        ).normalize()
                     } else {
-                        // Local wins: keep local item as-is, do not copy imported cover
+                        // v2 to v2 merge: take imported as-is (respects user edits/clearing)
+                        importedItem.copy(id = existingLocal.id).normalize()
                     }
+
+                    result[existingLocal.id] = winningItem
+                    coverIdsToRestore.add(importedItem.id)
                 }
             }
-            
-            MergeResult(
-                mergedItems = result.values.toList(),
-                coverIdsToRestore = coverIdsToRestore
-            )
         }
+
+        MergeResult(
+            mergedItems = result.values.toList(),
+            coverIdsToRestore = coverIdsToRestore
+        )
+    }
 
     private fun MediaItem.toDto() = MediaItemBackupDto(
         id = id,
@@ -120,6 +139,12 @@ object BackupProcessor {
         userStatus = userStatus.name,
         rating = rating,
         notes = notes.ifBlank { null },
+        genres = genres.ifEmpty { null },
+        tags = tags.ifEmpty { null },
+        author = author.ifBlank { null },
+        description = description.ifBlank { null },
+        startDate = startDate,
+        endDate = endDate,
         lastUpdated = lastUpdated,
         dateAdded = dateAdded
     )
@@ -132,7 +157,7 @@ object BackupProcessor {
         val safeTotal = totalItems?.takeIf { it >= 0 }
         val safeLastUpdated = if (lastUpdated != null && lastUpdated > 0L) lastUpdated else 0L
         val safeDateAdded = if (dateAdded != null && dateAdded > 0L) dateAdded else System.currentTimeMillis()
-        
+
         return MediaItem(
             id = id.takeIf { !it.isNullOrBlank() } ?: UUID.randomUUID().toString(),
             category = safeCategory,
@@ -146,6 +171,12 @@ object BackupProcessor {
             userStatus = safeStatus,
             rating = rating,
             notes = notes?.trim() ?: "",
+            genres = genres ?: emptyList(),
+            tags = tags ?: emptyList(),
+            author = author?.trim() ?: "",
+            description = description?.trim() ?: "",
+            startDate = startDate,
+            endDate = endDate,
             lastUpdated = safeLastUpdated,
             dateAdded = safeDateAdded
         ).normalize()

@@ -105,7 +105,8 @@ class SettingsViewModel(
         _uiState.value = _uiState.value.copy(isImporting = true, errorMsg = null, successMsg = null)
         viewModelScope.launch {
             try {
-                val imported = BackupManager.import(context, uri)
+                val imported = BackupManager.readZipContent(context, uri)
+
                 _uiState.value = _uiState.value.copy(
                     isImporting = false,
                     importedBackup = imported
@@ -133,7 +134,8 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 val local = repository.getAll()
-                val mergeResult = BackupProcessor.merge(local, imported.items)
+                val mergeResult = BackupProcessor.merge(local, imported.items, imported.schemaVersion)
+
                 
                 // Ensure local covers directory exists
                 if (!localCoversDir.exists()) localCoversDir.mkdirs()

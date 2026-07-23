@@ -15,6 +15,7 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 data class ImportedBackup(
+    val schemaVersion: Int,
     val items: List<MediaItem>,
     val tempCoversDir: File
 )
@@ -49,8 +50,8 @@ object BackupManager {
                             if (coverFile.exists()) {
                                 val coverEntry = ZipEntry("covers/${item.id}")
                                 zos.putNextEntry(coverEntry)
-                                FileInputStream(coverFile).use { input ->
-                                    input.copyTo(zos)
+                                FileInputStream(coverFile).use { fis ->
+                                    fis.copyTo(zos)
                                 }
                                 zos.closeEntry()
                             }
@@ -59,39 +60,27 @@ object BackupManager {
                 }
             }
 
-            // Copy temp file to SAF URI using "wt" write+truncate mode to prevent trailing garbage
-            context.contentResolver.openOutputStream(uri, "wt").use { outputStream ->
-                if (outputStream == null) throw IOException("Failed to open SAF output stream")
-                FileInputStream(tempFile).use { inputStream ->
-                    inputStream.copyTo(outputStream)
+            // Copy output to target SAF URI
+            context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                FileInputStream(tempFile).use { input ->
+                    input.copyTo(output)
                 }
-            }
+            } ?: throw IOException("Failed to open SAF output stream for writing")
         } finally {
-            if (tempFile.exists()) {
-                tempFile.delete()
-            }
+            if (tempFile.exists()) tempFile.delete()
         }
     }
 
     /**
-     * Imports and unzips a .lazydex ZIP archive from SAF.
-     * Extracts backup.json and extracts cover files to a temporary cache folder.
+     * Inspects a .lazydex ZIP file from a SAF URI.
+     * Extracts backup.json and unpacks covers into a temporary cache folder.
+     * Returns an ImportedBackup object containing deserialized items and temp covers location.
      */
-    suspend fun import(
-        context: Context,
-        uri: Uri
-    ): ImportedBackup = withContext(Dispatchers.IO) {
-        // Enforce 50MB limit
-        context.contentResolver.openFileDescriptor(uri, "r").use { pfd ->
-            val size = pfd?.statSize ?: 0L
-            if (size > 50L * 1024 * 1024) {
-                throw IllegalArgumentException("Backup file exceeds the 50MB size limit")
-            }
-        }
+    suspend fun readZipContent(context: Context, uri: Uri): ImportedBackup = withContext(Dispatchers.IO) {
+        val tempCoversDir = File(context.cacheDir, "import_covers_${UUID.randomUUID()}")
+        tempCoversDir.mkdirs()
 
-        val tempCoversDir = File(context.cacheDir, "temp_covers_${UUID.randomUUID()}")
-        if (!tempCoversDir.exists()) tempCoversDir.mkdirs()
-
+        var schemaVersion = 1
         var items: List<MediaItem> = emptyList()
 
         context.contentResolver.openInputStream(uri).use { inputStream ->
@@ -102,12 +91,13 @@ object BackupManager {
                     if (entry.name == "backup.json") {
                         val jsonBytes = zis.readBytes()
                         val jsonString = jsonBytes.decodeToString()
-                        items = BackupProcessor.deserialize(jsonString)
+                        val deserialized = BackupProcessor.deserialize(jsonString)
+                        schemaVersion = deserialized.schemaVersion
+                        items = deserialized.items
                     } else if (entry.name.startsWith("covers/")) {
                         val coverId = entry.name.removePrefix("covers/")
                         if (coverId.isNotEmpty()) {
                             val coverFile = File(tempCoversDir, coverId)
-                            // Create parent dirs just in case
                             coverFile.parentFile?.mkdirs()
                             FileOutputStream(coverFile).use { fos ->
                                 zis.copyTo(fos)
@@ -121,10 +111,11 @@ object BackupManager {
         }
 
         if (items.isEmpty()) {
-            throw IllegalArgumentException("Invalid backup: backup.json not found or contains no items")
+            cleanTempDir(tempCoversDir)
+            throw IllegalArgumentException("No valid media tracker items found in backup file")
         }
 
-        ImportedBackup(items, tempCoversDir)
+        ImportedBackup(schemaVersion = schemaVersion, items = items, tempCoversDir = tempCoversDir)
     }
 
     /**
