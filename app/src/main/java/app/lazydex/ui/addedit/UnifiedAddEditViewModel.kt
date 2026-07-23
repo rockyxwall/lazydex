@@ -35,6 +35,12 @@ data class AddEditFormState(
     val userStatus: UserStatus = UserStatus.READING,
     val rating: Double? = null,
     val notes: String = "",
+    val genres: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val author: String = "",
+    val description: String = "",
+    val startDate: Long? = null,
+    val endDate: Long? = null,
     val isScraping: Boolean = false,
     val isSaving: Boolean = false,
     val errorMsg: String? = null,
@@ -84,6 +90,7 @@ class UnifiedAddEditViewModel(
 ) : ViewModel() {
 
     private val itemId: String? = savedStateHandle["itemId"]
+    private val initialUrlParam: String? = savedStateHandle["initialUrl"]
 
     private val _formState = MutableStateFlow(AddEditFormState(isNew = itemId == null))
     val formState: StateFlow<AddEditFormState> = _formState.asStateFlow()
@@ -91,6 +98,13 @@ class UnifiedAddEditViewModel(
     private var originalItem: MediaItem? = null
 
     init {
+        initialUrlParam?.let { url ->
+            if (url.isNotBlank()) {
+                updateSourceUrl(url)
+                scrapeUrl()
+            }
+        }
+
         itemId?.let { id ->
             viewModelScope.launch {
                 repository.observeById(id).collect { item ->
@@ -109,6 +123,12 @@ class UnifiedAddEditViewModel(
                             userStatus = item.userStatus,
                             rating = item.rating,
                             notes = item.notes,
+                            genres = item.genres,
+                            tags = item.tags,
+                            author = item.author,
+                            description = item.description,
+                            startDate = item.startDate,
+                            endDate = item.endDate,
                             isNew = false
                         )
                     }
@@ -122,7 +142,6 @@ class UnifiedAddEditViewModel(
     }
 
     fun updateCategory(category: MediaCategory) {
-        // Auto-adapt status if not compatible with new category
         val currentStatus = _formState.value.userStatus
         val adaptiveStatus = when (category) {
             MediaCategory.NOVEL, MediaCategory.MANGA -> {
@@ -178,6 +197,44 @@ class UnifiedAddEditViewModel(
         _formState.value = _formState.value.copy(notes = notes)
     }
 
+    fun updateAuthor(author: String) {
+        _formState.value = _formState.value.copy(author = author)
+    }
+
+    fun updateDescription(description: String) {
+        _formState.value = _formState.value.copy(description = description)
+    }
+
+    fun updateStartDate(date: Long?) {
+        _formState.value = _formState.value.copy(startDate = date)
+    }
+
+    fun updateEndDate(date: Long?) {
+        _formState.value = _formState.value.copy(endDate = date)
+    }
+
+    fun addGenre(genre: String) {
+        val trimmed = genre.trim()
+        if (trimmed.isNotBlank() && _formState.value.genres.none { it.equals(trimmed, ignoreCase = true) }) {
+            _formState.value = _formState.value.copy(genres = _formState.value.genres + trimmed)
+        }
+    }
+
+    fun removeGenre(genre: String) {
+        _formState.value = _formState.value.copy(genres = _formState.value.genres.filter { !it.equals(genre, ignoreCase = true) })
+    }
+
+    fun addTag(tag: String) {
+        val trimmed = tag.trim()
+        if (trimmed.isNotBlank() && _formState.value.tags.none { it.equals(trimmed, ignoreCase = true) }) {
+            _formState.value = _formState.value.copy(tags = _formState.value.tags + trimmed)
+        }
+    }
+
+    fun removeTag(tag: String) {
+        _formState.value = _formState.value.copy(tags = _formState.value.tags.filter { !it.equals(tag, ignoreCase = true) })
+    }
+
     fun scrapeUrl() {
         val url = _formState.value.sourceUrl.trim()
         if (url.isEmpty()) return
@@ -190,16 +247,19 @@ class UnifiedAddEditViewModel(
                 _formState.value = _formState.value.copy(
                     title = metadata.title.ifEmpty { _formState.value.title },
                     coverImageUrl = metadata.imageUrl.ifEmpty { _formState.value.coverImageUrl },
+                    author = metadata.author.ifEmpty { _formState.value.author },
+                    description = metadata.description.ifEmpty { _formState.value.description },
+                    genres = if (metadata.genres.isNotEmpty()) metadata.genres else _formState.value.genres,
+                    tags = if (metadata.tags.isNotEmpty()) metadata.tags else _formState.value.tags,
                     scrapeError = null
                 )
                 
-                // Attempt to guess category based on URL domains
-                val guessedCat = guessCategoryFromUrl(url)
-                if (guessedCat != null) {
-                    updateCategory(guessedCat)
+                metadata.category?.let { cat ->
+                    updateCategory(cat)
+                } ?: guessCategoryFromUrl(url)?.let { guessed ->
+                    updateCategory(guessed)
                 }
                 
-                // Trigger background cover download
                 if (metadata.imageUrl.isNotEmpty()) {
                     val tempFile = downloadImageToTemp(metadata.imageUrl)
                     if (tempFile != null) {
@@ -236,6 +296,12 @@ class UnifiedAddEditViewModel(
                 userStatus = state.userStatus,
                 rating = state.rating,
                 notes = state.notes,
+                genres = state.genres,
+                tags = state.tags,
+                author = state.author,
+                description = state.description,
+                startDate = state.startDate,
+                endDate = state.endDate,
                 lastUpdated = System.currentTimeMillis(),
                 dateAdded = originalItem?.dateAdded ?: System.currentTimeMillis()
             )
@@ -282,10 +348,19 @@ class UnifiedAddEditViewModel(
     fun checkBackPressAllowed(): Boolean {
         if (_formState.value.isDone) return true
         
-        // Form is dirty if values differ from original loaded item (or empty default for new)
         val state = _formState.value
         val isDirty = if (state.isNew) {
-            state.title.isNotEmpty() || state.sourceUrl.isNotEmpty() || state.notes.isNotEmpty() || state.alternativeTitles.isNotEmpty() || state.currentProgress != "0"
+            state.title.isNotEmpty() ||
+            state.sourceUrl.isNotEmpty() ||
+            state.notes.isNotEmpty() ||
+            state.alternativeTitles.isNotEmpty() ||
+            state.currentProgress != "0" ||
+            state.author.isNotEmpty() ||
+            state.description.isNotEmpty() ||
+            state.genres.isNotEmpty() ||
+            state.tags.isNotEmpty() ||
+            state.startDate != null ||
+            state.endDate != null
         } else {
             val orig = originalItem
             orig == null ||
@@ -298,7 +373,13 @@ class UnifiedAddEditViewModel(
             state.totalItems != (orig.totalItems?.toString() ?: "") ||
             state.userStatus != orig.userStatus ||
             state.rating != orig.rating ||
-            state.notes != orig.notes
+            state.notes != orig.notes ||
+            state.author != orig.author ||
+            state.description != orig.description ||
+            state.genres != orig.genres ||
+            state.tags != orig.tags ||
+            state.startDate != orig.startDate ||
+            state.endDate != orig.endDate
         }
 
         if (isDirty) {
@@ -336,7 +417,7 @@ class UnifiedAddEditViewModel(
     private fun guessCategoryFromUrl(url: String): MediaCategory? {
         val lower = url.lowercase()
         return when {
-            lower.contains("novelupdates.com") || lower.contains("royalroad.com") -> MediaCategory.NOVEL
+            lower.contains("novelupdates.com") || lower.contains("royalroad.com") || lower.contains("wtr-lab.com") -> MediaCategory.NOVEL
             lower.contains("mangadex.org") || lower.contains("manganato.com") -> MediaCategory.MANGA
             lower.contains("myanimelist.net/anime") || lower.contains("anilist.co/anime") -> MediaCategory.ANIME
             lower.contains("myanimelist.net/manga") || lower.contains("anilist.co/manga") -> MediaCategory.MANGA
