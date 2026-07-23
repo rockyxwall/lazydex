@@ -16,12 +16,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Book
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -30,6 +38,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -42,11 +51,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.lazydex.BuildConfig
+import app.lazydex.domain.model.MediaCategory
+import app.lazydex.ui.browser.BrowserScreen
+import app.lazydex.ui.components.CategoryDropdown
 import app.lazydex.ui.dex.DexScreen
+import app.lazydex.ui.dex.DexViewModel
 import app.lazydex.ui.statistics.StatisticsScreen
+import org.koin.androidx.compose.koinViewModel
 
 enum class ShellTab {
-    DEX, STATISTICS, SETTINGS
+    DEX, STATISTICS, BROWSE, SETTINGS
 }
 
 @Composable
@@ -54,46 +68,91 @@ fun MainShellScreen(
     onNavigateToAppearance: () -> Unit,
     onNavigateToDataAndStorage: () -> Unit,
     onNavigateToAbout: () -> Unit,
-    onNavigateToAddItem: () -> Unit,
+    onNavigateToAddItem: (String?) -> Unit,
     onNavigateToEditItem: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    dexViewModel: DexViewModel = koinViewModel()
 ) {
     var currentTab by rememberSaveable { mutableStateOf(ShellTab.DEX) }
+    var showCategoryDropdown by rememberSaveable { mutableStateOf(false) }
+
+    val dexUiState by dexViewModel.uiState.collectAsState()
 
     Scaffold(
         bottomBar = {
             NavigationBar {
+                // 1. Dex Tab
+                val dexIcon = when (dexUiState.selectedCategory) {
+                    MediaCategory.NOVEL -> Icons.Default.Book
+                    MediaCategory.MANGA -> Icons.Default.MenuBook
+                    MediaCategory.ANIME -> Icons.Default.Casino
+                    MediaCategory.GAME -> Icons.Default.SportsEsports
+                    MediaCategory.MOVIE -> Icons.Default.Movie
+                    MediaCategory.TV -> Icons.Default.Tv
+                    null -> Icons.Default.Bookmark
+                }
+                val dexLabel = dexUiState.selectedCategory?.displayName ?: "Dex"
+
                 NavigationBarItem(
                     selected = currentTab == ShellTab.DEX,
-                    onClick = { currentTab = ShellTab.DEX },
-                    icon = {
-                        Icon(
-                            imageVector = Icons.Default.Book,
-                            contentDescription = "Dex"
-                        )
+                    onClick = {
+                        if (currentTab == ShellTab.DEX) {
+                            showCategoryDropdown = true
+                        } else {
+                            currentTab = ShellTab.DEX
+                        }
                     },
-                    label = { Text("Dex") }
+                    icon = {
+                        Box {
+                            Icon(imageVector = dexIcon, contentDescription = dexLabel)
+                            CategoryDropdown(
+                                expanded = showCategoryDropdown,
+                                onDismissRequest = { showCategoryDropdown = false },
+                                selectedCategory = dexUiState.selectedCategory,
+                                perCategoryCounts = dexUiState.perCategoryCounts,
+                                onSelectCategory = { cat -> dexViewModel.selectCategory(cat) }
+                            )
+                        }
+                    },
+                    label = { Text("$dexLabel ▾") }
                 )
+
+                // 2. Statistics Tab
                 NavigationBarItem(
                     selected = currentTab == ShellTab.STATISTICS,
                     onClick = { currentTab = ShellTab.STATISTICS },
+                    icon = { Icon(imageVector = Icons.Default.BarChart, contentDescription = "Statistics") },
+                    label = { Text("Stats") }
+                )
+
+                // 3. Add (+) Button — Center Item
+                NavigationBarItem(
+                    selected = false,
+                    onClick = { onNavigateToAddItem(null) },
                     icon = {
                         Icon(
-                            imageVector = Icons.Default.BarChart,
-                            contentDescription = "Statistics"
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Add",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
                         )
                     },
-                    label = { Text("Statistics") }
+                    label = { Text("Add") }
                 )
+
+                // 4. Browse Tab
+                NavigationBarItem(
+                    selected = currentTab == ShellTab.BROWSE,
+                    onClick = { currentTab = ShellTab.BROWSE },
+                    icon = { Icon(imageVector = Icons.Default.Search, contentDescription = "Browse") },
+                    label = { Text("Browse") }
+                )
+
+                // 5. Settings Tab
                 NavigationBarItem(
                     selected = currentTab == ShellTab.SETTINGS,
                     onClick = { currentTab = ShellTab.SETTINGS },
-                    icon = {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings"
-                        )
-                    },
+                    icon = { Icon(imageVector = Icons.Default.Settings, contentDescription = "Settings") },
                     label = { Text("Settings") }
                 )
             }
@@ -108,13 +167,20 @@ fun MainShellScreen(
             when (currentTab) {
                 ShellTab.DEX -> {
                     DexScreen(
-                        onNavigateToAddItem = onNavigateToAddItem,
+                        onNavigateToAddItem = { onNavigateToAddItem(null) },
                         onNavigateToEditItem = onNavigateToEditItem,
+                        viewModel = dexViewModel,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
                 ShellTab.STATISTICS -> {
                     StatisticsScreen(
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                ShellTab.BROWSE -> {
+                    BrowserScreen(
+                        onNavigateToCreateFromUrl = { url -> onNavigateToAddItem(url) },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
