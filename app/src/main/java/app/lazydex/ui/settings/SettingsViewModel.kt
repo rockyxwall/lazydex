@@ -92,9 +92,7 @@ class SettingsViewModel(
 
     fun initiateAnilistAuth(context: Context) {
         viewModelScope.launch {
-            val stateUuid = UUID.randomUUID().toString()
-            tokenStore.addOAuthState(stateUuid)
-            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=${AnilistTokenStore.DEFAULT_CLIENT_ID}&response_type=token&redirect_uri=lazydex://anilist-auth&state=$stateUuid"
+            val authUrl = "https://anilist.co/api/v2/oauth/authorize?client_id=${AnilistTokenStore.DEFAULT_CLIENT_ID}&response_type=token"
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

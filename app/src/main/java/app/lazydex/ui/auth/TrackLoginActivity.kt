@@ -39,28 +39,30 @@ class TrackLoginActivity : ComponentActivity() {
         }
 
         val rawDataString = intent.dataString ?: uri.toString()
-        val fragment = uri.encodedFragment ?: uri.fragment ?: extractFragmentFromRawUrl(rawDataString) ?: ""
-
-        val params = fragment.split("&").associate { param ->
-            val parts = param.split("=")
-            parts[0] to Uri.decode(parts.getOrNull(1) ?: "")
+        val dataString = when {
+            !uri.encodedQuery.isNullOrBlank() -> uri.encodedQuery
+            !uri.encodedFragment.isNullOrBlank() -> uri.encodedFragment
+            else -> extractFragmentFromRawUrl(rawDataString)
         }
 
+        val params = dataString
+            ?.split("&")
+            ?.filter { it.isNotBlank() }
+            ?.associate { param ->
+                val parts = param.split("=", limit = 2).map(Uri::decode)
+                parts[0] to (parts.getOrNull(1) ?: "")
+            }
+            .orEmpty()
+
         val accessToken = params["access_token"]
-        val returnedState = params["state"] ?: ""
         val expiresIn = params["expires_in"]?.toLongOrNull() ?: 31536000L
 
-        if (!accessToken.isNullOrBlank() && returnedState.isNotBlank()) {
+        if (!accessToken.isNullOrBlank()) {
             lifecycleScope.launch {
-                val isValidState = tokenStore.validateAndConsumeState(returnedState)
-                if (isValidState) {
-                    try {
-                        syncManager.loginWithToken(accessToken, expiresIn)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to complete login with token", e)
-                    }
-                } else {
-                    Log.w(TAG, "CSRF State validation failed for state: $returnedState")
+                try {
+                    syncManager.loginWithToken(accessToken, expiresIn)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to complete login with token", e)
                 }
                 returnToSettings()
             }
