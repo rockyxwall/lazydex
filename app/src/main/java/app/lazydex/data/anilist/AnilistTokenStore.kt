@@ -26,7 +26,7 @@ class AnilistTokenStore(private val context: Context) {
         private const val KEY_USER_NAME = "user_name"
         private const val KEY_SCORE_FORMAT = "score_format"
         private const val KEY_OAUTH_STATES = "oauth_states"
-        const val DEFAULT_CLIENT_ID = "16329"
+        const val DEFAULT_CLIENT_ID = "46821"
         private const val MASTER_KEY_ALIAS = "_ দাবি_master_key_"
     }
 
